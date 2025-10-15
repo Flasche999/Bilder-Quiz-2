@@ -12,6 +12,11 @@
     <h1>Spieler · Bilder‑Rätsel Quiz</h1>
 
     <div id="joinCard" class="card">
+    <div id="liveLobby" class="card" style="display:block">
+      <h3>Teams & Spieler (Lobby)</h3>
+      <div id="teamGrid"></div>
+    </div>
+
       <div class="row">
         <div class="col">
           <label>Dein Spielername</label>
@@ -45,6 +50,13 @@
           <div id="lockedMarker" class="marker locked" style="display:none"></div>
         </div>
       </div>
+      
+      <div class="hr"></div>
+      <div>
+        <h3>Teams & Punkte</h3>
+        <div id="sidebarTeams"></div>
+      </div>
+
       <div class="row" style="margin-top:10px">
         <button id="btnLock" class="btn good">✅ Fertig (einloggen)</button>
         <button id="btnUnlock" class="btn warn" style="display:none">🔓 Änderung</button>
@@ -56,6 +68,8 @@
 
   <script>
     const socket = io();
+const COLORS = ['#4da3ff','#ff4d6d','#22c55e','#eab308'];
+window.__stateTeams = {}; window.__statePlayers = {};
     const joinCard = document.getElementById('joinCard');
     const gameCard = document.getElementById('gameCard');
     const playerNameInput = document.getElementById('playerName');
@@ -91,6 +105,65 @@
       return {left:r.left + window.scrollX, top:r.top + window.scrollY, width:r.width, height:r.height};
     }
     function px(v){ return v+'px'; }
+    
+    function teamColor(t){
+      const idx = (t && typeof t.colorIdx==='number') ? t.colorIdx : 0;
+      return COLORS[idx % COLORS.length];
+    }
+
+    function renderLobbyTeams(){
+      const grid = document.getElementById('teamGrid');
+      const teams = window.__stateTeams || {};
+      const players = window.__statePlayers || {};
+      const grouped = {};
+      Object.values(players).forEach(p=>{
+        grouped[p.teamId] = grouped[p.teamId] || [];
+        grouped[p.teamId].push(p);
+      });
+      const cards = Object.values(teams).map(t=>{
+        const list = grouped[t.id] || [];
+        const full = list.length >= 2;
+        const color = teamColor(t);
+        const btn = full ? `<button class="btn" disabled>Team voll</button>` : `<button class="btn acc" data-join="${t.id}">Team beitreten</button>`;
+        return `<div class="card" style="border-left:6px solid ${color}; margin:6px 0">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <div>
+              <div class="tag" style="border-color:${color}">🏷️ ${t.name}</div>
+              <div class="small">Punkte: <strong>${t.points||0}</strong> • Spieler (${list.length}/2): ${list.map(p=>p.name).join(', ')||'—'}</div>
+            </div>
+            ${btn}
+          </div>
+        </div>`;
+      }).join('') || '<div class="small">Noch keine Teams – gib oben einen Teamnamen ein, um das erste zu erstellen.</div>';
+      grid.innerHTML = cards;
+      grid.querySelectorAll('button[data-join]').forEach(b=>{
+        b.onclick = ()=>{
+          const teamId = b.getAttribute('data-join');
+          // Fill teamName input with selected team; keep player name as typed
+          const t = teams[teamId];
+          if(t){ teamNameInput.value = t.name; }
+        };
+      });
+    }
+
+    function renderSidebar(){
+      const el = document.getElementById('sidebarTeams');
+      const teams = Object.values(window.__stateTeams||{});
+      const players = window.__statePlayers || {};
+      const grouped = {};
+      Object.values(players).forEach(p=>{
+        grouped[p.teamId] = grouped[p.teamId] || [];
+        grouped[p.teamId].push(p);
+      });
+      el.innerHTML = teams.map(t=>{
+        const color = teamColor(t);
+        const list = grouped[t.id] || [];
+        return `<div class="tag" style="display:block;margin:4px 0;border-color:${color}">
+          ⭐ ${t.points||0} — ${t.name} <span class="small">(${list.map(p=>p.name).join(', ')||'—'})</span>
+        </div>`;
+      }).join('');
+    }
+
     function placeMarkerAt(el, x, y, r){
       el.style.left = px(x);
       el.style.top = px(y);
@@ -112,6 +185,8 @@
       joinCard.style.display='none';
       gameCard.style.display='block';
     });
+
+    socket.on('state', s=>{ window.__stateTeams = s.teams||{}; window.__statePlayers = s.players||{}; renderLobbyTeams(); renderSidebar(); });
 
     // Round flow
     socket.on('round:config', (cfg)=>{
