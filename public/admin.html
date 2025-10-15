@@ -3,12 +3,13 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Admin · Bilder‑Rätsel Quiz</title>
+  <title>Admin · Bilder-Rätsel Quiz</title>
   <link rel="stylesheet" href="/style.css"/>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 </head>
 <body>
   <div class="container">
+    <!-- Verlauf / History -->
     <div class="card">
       <h3>Verlauf / History</h3>
       <div class="row" style="align-items:center;justify-content:space-between">
@@ -18,6 +19,7 @@
       <div id="historyList" style="max-height:220px;overflow:auto;margin-top:8px"></div>
     </div>
 
+    <!-- Bild-Pool Upload -->
     <div class="card">
       <h3>Bild-Pool Upload</h3>
       <div class="row">
@@ -27,6 +29,19 @@
       <div id="uploadList" class="small" style="margin-top:8px"></div>
     </div>
 
+    <!-- Wer ist dran? -->
+    <div class="card">
+      <h3>Wer ist dran?</h3>
+      <div class="row" style="align-items:center;gap:8px">
+        <div class="tag">Aktuell: <span id="turnNow">–</span></div>
+        <select id="turnSelect"></select>
+        <button id="btnPrevTurn" class="btn">⬅️ Vorheriges Team</button>
+        <button id="btnNextTurn" class="btn">➡️ Nächstes Team</button>
+      </div>
+      <div class="small">Hinweis: Reihenfolge ist alphabetisch nach Teamnamen. Auswahl wirkt sofort.</div>
+    </div>
+
+    <!-- Playlist / Runden -->
     <div class="card">
       <h3>Playlist / Runden</h3>
       <div class="row">
@@ -49,7 +64,9 @@
       </div>
     </div>
 
-    <h1>Admin · Bilder‑Rätsel Quiz</h1>
+    <h1>Admin · Bilder-Rätsel Quiz</h1>
+
+    <!-- Hauptkarte: Bild, Frage, Steuerung, Punkte -->
     <div class="card">
       <div class="row">
         <div class="col">
@@ -61,7 +78,7 @@
           <input id="countdown" type="number" value="15" min="3" max="120"/>
         </div>
         <div class="col">
-          <label>Klick‑Radius (px)</label>
+          <label>Klick-Radius (px)</label>
           <input id="radius" type="number" value="45" min="5" max="200"/>
         </div>
       </div>
@@ -96,6 +113,7 @@
       </div>
     </div>
 
+    <!-- Lobby -->
     <div class="card">
       <h3>Lobby / Verbindungen</h3>
       <div id="lobby"></div>
@@ -104,10 +122,11 @@
 
   <script>
     const socket = io();
-const COLORS = ["#4da3ff","#ff4d6d","#22c55e","#eab308"]; // bis zu 4 Teams
-let playlist = [];
-let roundIdx = 0;
-let adminOverlay = { clicks:{} };
+    const COLORS = ["#4da3ff","#ff4d6d","#22c55e","#eab308"]; // bis zu 4 Teams
+    let playlist = [];
+    let roundIdx = 0;
+    let adminOverlay = { clicks:{} };
+
     const imgEl = document.getElementById('img');
     const targetEl = document.getElementById('target');
     const boardEl = document.getElementById('board');
@@ -125,9 +144,7 @@ let adminOverlay = { clicks:{} };
       const r = boardEl.getBoundingClientRect();
       return {left:r.left + window.scrollX, top:r.top + window.scrollY, width:r.width, height:r.height};
     }
-
     function px(v){ return v+'px'; }
-
     function placeMarkerAt(el, x, y, r){
       el.style.left = px(x);
       el.style.top = px(y);
@@ -136,11 +153,7 @@ let adminOverlay = { clicks:{} };
       el.style.display = 'block';
     }
 
-    imgEl.addEventListener('load', ()=>{
-      // Reset marker when image changes
-      targetEl.style.display='none';
-    });
-
+    imgEl.addEventListener('load', ()=>{ targetEl.style.display='none'; });
     radiusInput.addEventListener('input',()=>{
       radius = parseInt(radiusInput.value||'45',10);
       if(targetEl.style.display!=='none'){
@@ -148,10 +161,7 @@ let adminOverlay = { clicks:{} };
         targetEl.style.height = px(radius*2);
       }
     });
-
-    imageUrlInput.addEventListener('change', ()=>{
-      imgEl.src = imageUrlInput.value || '/images/sample.jpg';
-    });
+    imageUrlInput.addEventListener('change', ()=>{ imgEl.src = imageUrlInput.value || '/images/sample.jpg'; });
 
     boardEl.addEventListener('click', (e)=>{
       const r = boardRect();
@@ -161,22 +171,23 @@ let adminOverlay = { clicks:{} };
       placeMarkerAt(targetEl, x, y, radius);
     });
 
-    // Admin controls
+    // Admin controls (Rundensteuerung)
     document.getElementById('btnStart').onclick = ()=>{
       const payload = {
         imageUrl: imageUrlInput.value || '/images/sample.jpg',
         duration: Math.max(3, parseInt(countdownInput.value||'15',10)),
         radius: Math.max(5, Math.min(200, parseInt(radiusInput.value||'45',10))),
-        target
+        target,
+        question: (document.getElementById('question').value || '')
       };
       socket.emit('admin:startRound', payload);
     };
-
     document.getElementById('btnRevealGuesses').onclick = ()=> socket.emit('admin:revealGuesses');
-    document.getElementById('btnRevealArea').onclick = ()=> socket.emit('admin:revealArea');
+    document.getElementById('btnRevealArea').onclick = ()=> socket.emit('admin:revealArea', {autoNext:false});
+    document.getElementById('btnRevealAuto').onclick = ()=> socket.emit('admin:revealArea', {autoNext:true, delayMs:3000});
     document.getElementById('btnShowFull').onclick = ()=> socket.emit('admin:showFull');
 
-    // Score buttons UI
+    // Teams & Punkte
     function renderTeams(state){
       teamsEl.innerHTML = '';
       const t = state.teams || {};
@@ -184,7 +195,7 @@ let adminOverlay = { clicks:{} };
         const row = document.createElement('div');
         row.className='score-row';
         row.innerHTML = `
-          <div class="name tag">🏷️ ${team.name}</div>
+          <div class="name tag" style="border-color:${COLORS[team.colorIdx||0]}">🏷️ ${team.name}</div>
           <div class="score tag">⭐ ${team.points||0}</div>
           <button class="btn good" data-id="${team.id}" data-a="plus1">+1</button>
           <button class="btn bad" data-id="${team.id}" data-a="minus1">-1</button>
@@ -193,7 +204,6 @@ let adminOverlay = { clicks:{} };
         `;
         teamsEl.appendChild(row);
       });
-
       teamsEl.querySelectorAll('button').forEach(btn=>{
         const id = btn.getAttribute('data-id');
         const a = btn.getAttribute('data-a');
@@ -208,6 +218,7 @@ let adminOverlay = { clicks:{} };
       });
     }
 
+    // Lobby
     function renderLobby(state){ window.__statePlayers = state.players || {};
       const players = Object.values(state.players||{});
       const byTeam = {};
@@ -218,12 +229,12 @@ let adminOverlay = { clicks:{} };
       lobbyEl.innerHTML = Object.entries(byTeam).map(([teamId, list])=>{
         const t = (state.teams||{})[teamId];
         const tname = t ? t.name : '(Team?)';
-        return `<div class="tag">👥 ${tname}: ${list.map(p=>p.name).join(', ')}</div>`;
+        const color = t ? COLORS[t.colorIdx||0] : '#888';
+        return `<div class="tag" style="border-color:${color}">👥 ${tname}: ${list.map(p=>p.name).join(', ')}</div>`;
       }).join(' ');
     }
 
-
-    // Resize overlay to image size
+    // Overlay Größen-Anpassung
     const overlay = document.getElementById('overlay');
     function fitOverlay(){
       const r = boardEl.getBoundingClientRect();
@@ -233,7 +244,7 @@ let adminOverlay = { clicks:{} };
     window.addEventListener('resize', fitOverlay);
     new ResizeObserver(fitOverlay).observe(boardEl);
 
-    
+    // Overlay zeichnen (Kreise + Labels)
     function drawOverlay(){
       const ctx = overlay.getContext('2d');
       ctx.clearRect(0,0,overlay.width,overlay.height);
@@ -255,7 +266,7 @@ let adminOverlay = { clicks:{} };
           ctx.arc(x,y,3,0,Math.PI*2);
           ctx.fillStyle = color;
           ctx.fill();
-          // Label with team + player
+          // Label mit Team + Spieler
           const pname = (players[pid] && players[pid].name) ? players[pid].name : pid.slice(0,4);
           const tname = (teams[tid] && teams[tid].name) ? teams[tid].name : tid;
           const label = `${tname} · ${pname}`;
@@ -274,11 +285,11 @@ let adminOverlay = { clicks:{} };
       });
     }
 
-
-    // Playlist handling
+    // Playlist
     const playlistJsonEl = document.getElementById('playlistJson');
     const questionInput = document.getElementById('question');
     const roundIndexEl = document.getElementById('roundIndex');
+
     document.getElementById('btnLoadPlaylist').onclick = ()=>{
       try{
         const arr = JSON.parse(playlistJsonEl.value || '[]');
@@ -298,11 +309,14 @@ let adminOverlay = { clicks:{} };
           }
         }
         alert('Playlist geladen: '+playlist.length+' Runden');
+        updateRoundProgress();
       }catch(e){
         alert('Fehler beim Laden der Playlist: '+e.message);
       }
     };
-    document.getElementById('btnStartCurrent').onclick = ()=>{ updateRoundProgress();
+
+    document.getElementById('btnStartCurrent').onclick = ()=>{ 
+      updateRoundProgress();
       const payload = {
         imageUrl: imageUrlInput.value || '/images/sample.svg',
         duration: Math.max(3, parseInt(countdownInput.value||'15',10)),
@@ -312,6 +326,7 @@ let adminOverlay = { clicks:{} };
       };
       socket.emit('admin:startRound', payload);
     };
+
     document.getElementById('btnNextRound').onclick = ()=>{
       if(!playlist.length){ alert('Bitte zuerst eine Playlist laden.'); return; }
       roundIdx = (roundIdx + 1) % playlist.length;
@@ -325,34 +340,67 @@ let adminOverlay = { clicks:{} };
       target = r.target || {x:0,y:0};
       if(r.target) placeMarkerAt(targetEl, r.target.x, r.target.y, parseInt(radiusInput.value,10));
       else targetEl.style.display='none';
+      updateRoundProgress();
     };
 
-    // Keep admin state teams to colorize overlay
+    // Admin State-Spiegel für Overlay
     window.__stateTeams = {};
+    window.__statePlayers = {};
+
+    // Turn-Rendering (Admin)
+    function renderTurn(state){
+      const sel = document.getElementById('turnSelect');
+      const now = document.getElementById('turnNow');
+      const teams = state.teams || {};
+      const ids = Object.values(teams).sort((a,b)=> a.name.localeCompare(b.name));
+      sel.innerHTML = ids.map(t=> `<option value="${t.id}">${t.name}</option>`).join('');
+      if(state.turnTeamId && teams[state.turnTeamId]){
+        sel.value = state.turnTeamId;
+        now.textContent = teams[state.turnTeamId].name;
+        now.style.color = COLORS[teams[state.turnTeamId].colorIdx || 0];
+      }else{
+        now.textContent = '–';
+        now.style.color = '';
+      }
+    }
+    document.getElementById('btnPrevTurn').onclick = ()=> socket.emit('admin:prevTurn');
+    document.getElementById('btnNextTurn').onclick = ()=> socket.emit('admin:nextTurn');
+    document.getElementById('turnSelect').onchange = (e)=> socket.emit('admin:setTurn', {teamId:e.target.value});
+    socket.on('turn:update', ({teamId})=>{
+      const teams = window.__stateTeams || {};
+      const now = document.getElementById('turnNow');
+      if(teams[teamId]){
+        now.textContent = teams[teamId].name;
+        now.style.color = COLORS[teams[teamId].colorIdx || 0];
+        const sel = document.getElementById('turnSelect');
+        sel.value = teamId;
+      }
+    });
+
+    // Global State-Updates
     socket.on('state', s=>{
       window.__stateTeams = s.teams || {};
       renderTeams(s);
       renderLobby(s);
+      renderTurn(s);
       fitOverlay();
       drawOverlay();
     });
 
-    // Admin receives live clicks of all teams
+    // Live-Clicks fürs Admin-Overlay
     socket.on('admin:liveClick', ({teamId, playerId, x, y})=>{
       adminOverlay.clicks[teamId] = adminOverlay.clicks[teamId] || {};
       adminOverlay.clicks[teamId][playerId] = {x,y};
       drawOverlay();
     });
 
-    // Reset overlay per round
+    // Runden-Reset fürs Overlay
     socket.on('round:config', ()=>{
       adminOverlay.clicks = {};
       drawOverlay();
     });
 
-
-    
-    window.__statePlayers = {};
+    // History empfangen
     function renderHistory(list){
       const el = document.getElementById('historyList');
       if(!Array.isArray(list) || !list.length){ el.innerHTML = '<div class="small">Noch keine Runden.</div>'; return; }
@@ -367,7 +415,7 @@ let adminOverlay = { clicks:{} };
     }
     socket.on('admin:history', renderHistory);
 
-    // Round progress helper
+    // Fortschritt
     function updateRoundProgress(){
       const total = playlist.length || '–';
       const cur = (playlist.length ? (roundIdx+1) : '–');
@@ -375,33 +423,15 @@ let adminOverlay = { clicks:{} };
       document.getElementById('roundIndex').textContent = (playlist.length ? roundIdx : 0);
     }
 
-    // Auto-Next request from server
+    // Auto-Weiter-Request vom Server
     socket.on('admin:requestNext', ()=>{
-      // advance playlist and optionally auto-start
       if(playlist.length){
         document.getElementById('btnNextRound').click();
         document.getElementById('btnStartCurrent').click();
       }
     });
 
-    // Buttons
-    document.getElementById('btnRevealAuto').onclick = ()=>{
-      socket.emit('admin:revealArea', {autoNext:true, delayMs:3000});
-    };
-
-    // When playlist changes
-    const _oldLoad = document.getElementById('btnLoadPlaylist').onclick;
-    document.getElementById('btnLoadPlaylist').onclick = ()=>{
-      _oldLoad && _oldLoad();
-      updateRoundProgress();
-    };
-    const _oldNext = document.getElementById('btnNextRound').onclick;
-    document.getElementById('btnNextRound').onclick = ()=>{
-      _oldNext && _oldNext();
-      updateRoundProgress();
-    };
-
-    // Upload logic
+    // Upload
     async function readFilesAsDataUrls(files){
       const arr = [];
       for(const f of files){
@@ -433,7 +463,7 @@ let adminOverlay = { clicks:{} };
       });
     };
 
-    // Ask to join as admin
+    // Admin-Handshake
     socket.emit('admin:hello');
   </script>
 </body>
