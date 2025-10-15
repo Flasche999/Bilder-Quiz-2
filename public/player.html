@@ -3,24 +3,24 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Spieler · Bilder‑Rätsel Quiz</title>
+  <title>Spieler · Bilder-Rätsel Quiz</title>
   <link rel="stylesheet" href="/style.css"/>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 </head>
 <body>
   <div class="container">
-    <h1>Spieler · Bilder‑Rätsel Quiz</h1>
+    <h1>Spieler · Bilder-Rätsel Quiz</h1>
 
     <div id="joinCard" class="card">
-    <div id="liveLobby" class="card" style="display:block">
-      <h3>Teams & Spieler (Lobby)</h3>
-      <div id="teamGrid"></div>
-    </div>
+      <div id="liveLobby" class="card" style="display:block">
+        <h3>Teams & Spieler (Lobby)</h3>
+        <div id="teamGrid"></div>
+      </div>
 
       <div class="row">
         <div class="col">
           <label>Dein Spielername</label>
-          <input id="playerName" placeholder="z. B. Dennis"/>
+          <input id="playerName" placeholder="z. B. Dennis"/>
         </div>
         <div class="col">
           <label>Team wählen oder neu eingeben (2–4 Teams gesamt)</label>
@@ -30,7 +30,7 @@
           <button id="btnJoin" class="btn acc">Beitreten</button>
         </div>
       </div>
-      <div class="small">Hinweis: Dein Team‑Partner sieht live deinen Klick‑Marker – andere Teams nicht.</div>
+      <div class="small">Hinweis: Dein Team-Partner sieht live deinen Klick-Marker – andere Teams nicht.</div>
     </div>
 
     <div id="gameCard" class="card" style="display:none">
@@ -39,6 +39,7 @@
         <div class="tag">Team: <span id="myTeamName"></span></div>
         <div class="tag">Countdown: <span id="countdown">–</span></div>
         <div class="tag">Status: <span id="status">Warten…</span></div>
+        <div class="tag">Dran: <span id="turnNow">–</span></div>
       </div>
       <div class="hr"></div>
       <div class="center">
@@ -68,8 +69,13 @@
 
   <script>
     const socket = io();
-const COLORS = ['#4da3ff','#ff4d6d','#22c55e','#eab308'];
-window.__stateTeams = {}; window.__statePlayers = {};
+    const COLORS = ['#4da3ff','#ff4d6d','#22c55e','#eab308'];
+    window.__stateTeams = {}; 
+    window.__statePlayers = {};
+
+    // Turn-Mirror (welches Team ist dran)
+    let __turnTeamId = null;
+
     const joinCard = document.getElementById('joinCard');
     const gameCard = document.getElementById('gameCard');
     const playerNameInput = document.getElementById('playerName');
@@ -87,12 +93,13 @@ window.__stateTeams = {}; window.__statePlayers = {};
     const btnLock = document.getElementById('btnLock');
     const btnUnlock = document.getElementById('btnUnlock');
     const toast = document.getElementById('toast');
+    const questionEl = document.getElementById('question');
+    const turnNowEl = document.getElementById('turnNow');
 
     let my = {id:null, name:'', teamId:null};
     let canClick = false;
     let radius = 45;
     let locked = false;
-    let imageRect = null;
 
     function showToast(msg){
       toast.textContent = msg;
@@ -111,6 +118,7 @@ window.__stateTeams = {}; window.__statePlayers = {};
       return COLORS[idx % COLORS.length];
     }
 
+    // ---- Lobby-Karten ----
     function renderLobbyTeams(){
       const grid = document.getElementById('teamGrid');
       const teams = window.__stateTeams || {};
@@ -139,13 +147,13 @@ window.__stateTeams = {}; window.__statePlayers = {};
       grid.querySelectorAll('button[data-join]').forEach(b=>{
         b.onclick = ()=>{
           const teamId = b.getAttribute('data-join');
-          // Fill teamName input with selected team; keep player name as typed
           const t = teams[teamId];
           if(t){ teamNameInput.value = t.name; }
         };
       });
     }
 
+    // ---- Sidebar Teams & Punkte ----
     function renderSidebar(){
       const el = document.getElementById('sidebarTeams');
       const teams = Object.values(window.__stateTeams||{});
@@ -164,6 +172,7 @@ window.__stateTeams = {}; window.__statePlayers = {};
       }).join('');
     }
 
+    // ---- Marker setzen ----
     function placeMarkerAt(el, x, y, r){
       el.style.left = px(x);
       el.style.top = px(y);
@@ -172,6 +181,28 @@ window.__stateTeams = {}; window.__statePlayers = {};
       el.style.display = 'block';
     }
 
+    // ---- Turn-Helpers (nur aktuelles Team darf klicken) ----
+    function isMyTurn(){
+      return !!(my && my.teamId && __turnTeamId && my.teamId === __turnTeamId);
+    }
+    function renderTurnPlayer(state){
+      const teams = state.teams || {};
+      const id = state.turnTeamId;
+      if(id && teams[id]){
+        turnNowEl.textContent = teams[id].name;
+        turnNowEl.style.color = COLORS[teams[id].colorIdx || 0];
+      }else{
+        turnNowEl.textContent = '–';
+        turnNowEl.style.color = '';
+      }
+    }
+    function updateBoardInteractivity(){
+      const enable = isMyTurn() && canClick && !locked;
+      boardEl.style.pointerEvents = enable ? 'auto' : 'none';
+      boardEl.style.opacity = enable ? '1' : '0.65';
+    }
+
+    // ---- Join ----
     btnJoin.onclick = ()=>{
       const name = (playerNameInput.value||'').trim();
       const teamName = (teamNameInput.value||'').trim();
@@ -186,12 +217,29 @@ window.__stateTeams = {}; window.__statePlayers = {};
       gameCard.style.display='block';
     });
 
-    socket.on('state', s=>{ window.__stateTeams = s.teams||{}; window.__statePlayers = s.players||{}; renderLobbyTeams(); renderSidebar(); });
+    // ---- Globaler State ----
+    socket.on('state', s=>{
+      window.__stateTeams = s.teams||{};
+      window.__statePlayers = s.players||{};
+      __turnTeamId = s.turnTeamId || null;
+      renderLobbyTeams();
+      renderSidebar();
+      renderTurnPlayer(s);
+      updateBoardInteractivity();
+    });
 
-    // Round flow
+    // turn:update (schnelles Live-Update)
+    socket.on('turn:update', ({teamId})=>{
+      __turnTeamId = teamId || null;
+      renderTurnPlayer({teams: window.__stateTeams, turnTeamId: __turnTeamId});
+      updateBoardInteractivity();
+    });
+
+    // ---- Rundenfluss ----
     socket.on('round:config', (cfg)=>{
       // Reset state
-      locked=false; canClick=false;
+      locked=false; 
+      canClick=false;
       myMarker.style.display='none';
       mateMarker.style.display='none';
       lockedMarker.style.display='none';
@@ -201,6 +249,8 @@ window.__stateTeams = {}; window.__statePlayers = {};
       imgEl.src = cfg.imageUrl;
       radius = cfg.radius;
       countdownEl.textContent = cfg.duration;
+      questionEl.textContent = cfg.question || '–';
+      updateBoardInteractivity();
     });
 
     socket.on('round:tick', (t)=>{
@@ -209,12 +259,22 @@ window.__stateTeams = {}; window.__statePlayers = {};
 
     socket.on('round:dark', ()=>{
       maskEl.style.display='block';
-      canClick=true;
-      statusEl.textContent = 'Klicke auf die gesuchte Stelle…';
+      // Nur klicken, wenn eigenes Team dran ist
+      canClick = isMyTurn();
+      statusEl.textContent = canClick ? 'Klicke auf die gesuchte Stelle…' : 'Warten – anderes Team ist dran…';
+      updateBoardInteractivity();
     });
 
+    // Klick aufs Board
     boardEl.addEventListener('click', (e)=>{
-      if(!canClick || locked) return;
+      if(!canClick || locked){
+        return;
+      }
+      if(!isMyTurn()){
+        showToast('Dein Team ist nicht dran.');
+        updateBoardInteractivity();
+        return;
+      }
       const r = boardRect();
       const x = e.pageX - r.left;
       const y = e.pageY - r.top;
@@ -222,9 +282,15 @@ window.__stateTeams = {}; window.__statePlayers = {};
       socket.emit('player:clickUpdate', {x, y});
     });
 
+    // Lock / Unlock (nur wenn dran)
     btnLock.onclick = ()=>{
+      if(!isMyTurn()){
+        showToast('Dein Team ist nicht dran.');
+        return;
+      }
       if(myMarker.style.display==='none'){ showToast('Bitte zuerst klicken.'); return; }
-      locked = true; canClick=false;
+      locked = true; 
+      canClick=false;
       btnLock.style.display='none';
       btnUnlock.style.display='inline-block';
       lockedMarker.style.left = myMarker.style.left;
@@ -234,14 +300,22 @@ window.__stateTeams = {}; window.__statePlayers = {};
       lockedMarker.style.display = 'block';
       socket.emit('player:lock');
       statusEl.textContent = 'Eingeloggt – warte auf Auflösung…';
+      updateBoardInteractivity();
     };
+
     btnUnlock.onclick = ()=>{
-      locked = false; canClick=true;
+      if(!isMyTurn()){
+        showToast('Dein Team ist nicht dran.');
+        return;
+      }
+      locked = false; 
+      canClick=true;
       btnLock.style.display='inline-block';
       btnUnlock.style.display='none';
       lockedMarker.style.display='none';
       socket.emit('player:unlock');
       statusEl.textContent = 'Änderung möglich – erneut klicken und einloggen.';
+      updateBoardInteractivity();
     };
 
     // Teammate live marker (hidden from other teams)
@@ -250,22 +324,20 @@ window.__stateTeams = {}; window.__statePlayers = {};
       placeMarkerAt(mateMarker, x, y, radius);
     });
 
-    // After admin reveals, show all teams
+    // Nach Auflösung
     socket.on('round:revealGuesses', (teamMarkers)=>{
-      // For simplicity, show teammate marker as-is; other teams are not drawn on player view
-      statusEl.textContent = 'Klicks sichtbar (Team‑weise)';
+      statusEl.textContent = 'Klicks sichtbar (Team-weise)';
     });
 
-    // Reveal target area (unmask circle at target)
     socket.on('round:revealArea', ({target, radius})=>{
-      // Create a circular clip by hiding part of the mask via CSS radial-gradient
       maskEl.style.background = `radial-gradient(circle ${radius}px at ${target.x}px ${target.y}px, rgba(0,0,0,0) 0%, rgba(0,0,0,0) ${radius-1}px, rgba(0,0,0,.88) ${radius}px)`;
     });
 
-    // Show full image again
     socket.on('round:showFull', ()=>{
       maskEl.style.display='none';
       statusEl.textContent = 'Gesamtes Bild sichtbar';
+      canClick = false;
+      updateBoardInteractivity();
     });
 
     // Utility updates
