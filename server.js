@@ -4,6 +4,7 @@ import http from 'http';
 import { Server } from 'socket.io';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,14 +14,41 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json({limit:'25mb'}));
 
 const PORT = process.env.PORT || 3000;
+
+// Upload endpoint: expects {files:[{name, dataUrl}]}
+app.post('/admin/upload', async (req, res)=>{
+  try{
+    const files = req.body && req.body.files;
+    if(!Array.isArray(files) || !files.length) return res.status(400).json({error:'No files'});
+    const saved = [];
+    for(const f of files){
+      const name = (f.name||'upload').replace(/[^a-z0-9_\-\.]/gi,'_');
+      const dataUrl = f.dataUrl||'';
+      const m = dataUrl.match(/^data:(.+);base64,(.*)$/);
+      if(!m) continue;
+      const b64 = m[2];
+      const buf = Buffer.from(b64, 'base64');
+      const dest = path.join(__dirname, 'public', 'uploads', name);
+      await fs.promises.writeFile(dest, buf);
+      saved.push('/uploads/'+name);
+    }
+    res.json({ok:true, urls:saved});
+  }catch(e){
+    console.error('upload error', e);
+    res.status(500).json({error:String(e)});
+  }
+});
+
 
 // ---- Game State ----
 const state = {
   teams: {},        // teamId -> { id, name, points, colorIdx }
   players: {},      // socket.id -> { id, name, teamId, teamName }
-  round: null       // { imageUrl, duration, endAt, radius, target:{x,y}, phase: 'idle|countdown|dark|reveal', locks: {teamId:bool}, clicks:{teamId:{[playerId]:{x,y}}} }
+  round: null,
+  history: [] // array of past rounds {ts, question, imageUrl, winners:[teamIds], clicks, target, radius}       // { imageUrl, duration, endAt, radius, target:{x,y}, phase: 'idle|countdown|dark|reveal', locks: {teamId:bool}, clicks:{teamId:{[playerId]:{x,y}}} }
 };
 
 function teamCount(){ return Object.keys(state.teams).length; }
@@ -44,11 +72,29 @@ function broadcastState(){
 }
 
 // ---- Sockets ----
+
+  // helper: determine winners (teams with any click within radius)
+  function computeWinners(){
+    if(!state.round) return [];
+    const winners = [];
+    const {clicks, target, radius} = state.round;
+    Object.entries(clicks||{}).forEach(([teamId, players])=>{
+      const hit = Object.values(players||{}).some(({x,y})=>{
+        const dx = (x - target.x), dy = (y - target.y);
+        return Math.hypot(dx,dy) <= radius;
+        });
+      if(hit) winners.push(teamId);
+    });
+    return winners;
+  }
+
+
 io.on('connection', (socket)=>{
 
   // Admin hello
   socket.on('admin:hello', ()=>{
     socket.emit('state', { teams: state.teams, players: state.players });
+    socket.emit('admin:history', state.history);
   });
 
   // Player joins with name + team
@@ -134,10 +180,21 @@ io.on('connection', (socket)=>{
     io.emit('round:revealGuesses', state.round.clicks);
   });
 
-  socket.on('admin:revealArea', ()=>{
+  socket.on('admin:revealArea', ({autoNext, delayMs})=>{
     if(!state.round) return;
     const { target, radius } = state.round;
     io.emit('round:revealArea', { target, radius });
+    // compute winners & save to history
+    const winners = computeWinners();
+    state.history.push({ ts: Date.now(), question: state.round.question, imageUrl: state.round.imageUrl, winners, clicks: state.round.clicks, target: state.round.target, radius: state.round.radius });
+    io.emit('admin:history', state.history);
+    if(autoNext){
+      const ms = Math.max(0, parseInt(delayMs||3000,10));
+      setTimeout(()=>{ io.emit('round:showFull'); }, Math.min(ms, 5000));
+      setTimeout(()=>{
+        io.emit('admin:requestNext'); // admin client moves playlist to next
+      }, Math.max(ms, 1500) + 2000);
+    }
   });
 
   socket.on('admin:showFull', ()=>{

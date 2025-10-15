@@ -10,6 +10,24 @@
 <body>
   <div class="container">
     <div class="card">
+      <h3>Verlauf / History</h3>
+      <div class="row" style="align-items:center;justify-content:space-between">
+        <div class="tag">Runden-Fortschritt: <span id="roundProgress">–</span></div>
+        <div class="small">Auto-Weiter nach Auflösung verfügbar</div>
+      </div>
+      <div id="historyList" style="max-height:220px;overflow:auto;margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <h3>Bild-Pool Upload</h3>
+      <div class="row">
+        <input id="fileInput" type="file" multiple accept="image/*"/>
+        <button id="btnUpload" class="btn">⬆️ Hochladen</button>
+      </div>
+      <div id="uploadList" class="small" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
       <h3>Playlist / Runden</h3>
       <div class="row">
         <div class="col">
@@ -67,6 +85,7 @@
             <button id="btnStart" class="btn acc">▶️ Runde starten</button>
             <button id="btnRevealGuesses" class="btn">👀 Klicks zeigen</button>
             <button id="btnRevealArea" class="btn good">🎯 Bereich aufdecken</button>
+            <button id="btnRevealAuto" class="btn good">🎯 Auflösen (Auto-Weiter)</button>
             <button id="btnShowFull" class="btn warn">🖼️ Bild komplett zeigen</button>
           </div>
           <div class="hr"></div>
@@ -189,7 +208,7 @@ let adminOverlay = { clicks:{} };
       });
     }
 
-    function renderLobby(state){
+    function renderLobby(state){ window.__statePlayers = state.players || {};
       const players = Object.values(state.players||{});
       const byTeam = {};
       players.forEach(p=>{
@@ -214,29 +233,47 @@ let adminOverlay = { clicks:{} };
     window.addEventListener('resize', fitOverlay);
     new ResizeObserver(fitOverlay).observe(boardEl);
 
+    
     function drawOverlay(){
       const ctx = overlay.getContext('2d');
       ctx.clearRect(0,0,overlay.width,overlay.height);
-      // draw per team color
       const teams = window.__stateTeams || {};
+      const players = window.__statePlayers || {};
       const teamIds = Object.keys(teams);
+      ctx.font = '12px system-ui, Arial';
+      ctx.textBaseline = 'top';
       teamIds.forEach((tid, idx)=>{
         const color = COLORS[idx % COLORS.length];
         const teamClicks = adminOverlay.clicks[tid] || {};
-        Object.values(teamClicks).forEach(({x,y})=>{
+        Object.entries(teamClicks).forEach(([pid, {x,y}])=>{
           ctx.beginPath();
           ctx.strokeStyle = color;
           ctx.lineWidth = 2;
           ctx.arc(x, y, radius, 0, Math.PI*2);
           ctx.stroke();
-          // small center dot
           ctx.beginPath();
           ctx.arc(x,y,3,0,Math.PI*2);
           ctx.fillStyle = color;
           ctx.fill();
+          // Label with team + player
+          const pname = (players[pid] && players[pid].name) ? players[pid].name : pid.slice(0,4);
+          const tname = (teams[tid] && teams[tid].name) ? teams[tid].name : tid;
+          const label = `${tname} · ${pname}`;
+          const padding = 3;
+          const tw = ctx.measureText(label).width + padding*2;
+          const th = 16;
+          const lx = Math.min(Math.max(0, x + radius + 6), overlay.width - tw);
+          const ly = Math.min(Math.max(0, y - th/2), overlay.height - th);
+          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillRect(lx, ly, tw, th);
+          ctx.strokeStyle = color;
+          ctx.strokeRect(lx, ly, tw, th);
+          ctx.fillStyle = '#e5e7eb';
+          ctx.fillText(label, lx + padding, ly + 2);
         });
       });
     }
+
 
     // Playlist handling
     const playlistJsonEl = document.getElementById('playlistJson');
@@ -265,7 +302,7 @@ let adminOverlay = { clicks:{} };
         alert('Fehler beim Laden der Playlist: '+e.message);
       }
     };
-    document.getElementById('btnStartCurrent').onclick = ()=>{
+    document.getElementById('btnStartCurrent').onclick = ()=>{ updateRoundProgress();
       const payload = {
         imageUrl: imageUrlInput.value || '/images/sample.svg',
         duration: Math.max(3, parseInt(countdownInput.value||'15',10)),
@@ -313,6 +350,88 @@ let adminOverlay = { clicks:{} };
       drawOverlay();
     });
 
+
+    
+    window.__statePlayers = {};
+    function renderHistory(list){
+      const el = document.getElementById('historyList');
+      if(!Array.isArray(list) || !list.length){ el.innerHTML = '<div class="small">Noch keine Runden.</div>'; return; }
+      el.innerHTML = list.slice().reverse().map((h,idx)=>{
+        const date = new Date(h.ts).toLocaleTimeString();
+        const winners = (h.winners||[]).map(tid=> (window.__stateTeams[tid]?.name||tid)).join(', ') || '—';
+        return `<div class="tag" style="display:block;margin:4px 0">
+          <div><strong>${date}</strong> – ${h.question||'(ohne Frage)'} – Gewinner: ${winners}</div>
+          <div class="small">${h.imageUrl}</div>
+        </div>`;
+      }).join('');
+    }
+    socket.on('admin:history', renderHistory);
+
+    // Round progress helper
+    function updateRoundProgress(){
+      const total = playlist.length || '–';
+      const cur = (playlist.length ? (roundIdx+1) : '–');
+      document.getElementById('roundProgress').textContent = `${cur}/${total}`;
+      document.getElementById('roundIndex').textContent = (playlist.length ? roundIdx : 0);
+    }
+
+    // Auto-Next request from server
+    socket.on('admin:requestNext', ()=>{
+      // advance playlist and optionally auto-start
+      if(playlist.length){
+        document.getElementById('btnNextRound').click();
+        document.getElementById('btnStartCurrent').click();
+      }
+    });
+
+    // Buttons
+    document.getElementById('btnRevealAuto').onclick = ()=>{
+      socket.emit('admin:revealArea', {autoNext:true, delayMs:3000});
+    };
+
+    // When playlist changes
+    const _oldLoad = document.getElementById('btnLoadPlaylist').onclick;
+    document.getElementById('btnLoadPlaylist').onclick = ()=>{
+      _oldLoad && _oldLoad();
+      updateRoundProgress();
+    };
+    const _oldNext = document.getElementById('btnNextRound').onclick;
+    document.getElementById('btnNextRound').onclick = ()=>{
+      _oldNext && _oldNext();
+      updateRoundProgress();
+    };
+
+    // Upload logic
+    async function readFilesAsDataUrls(files){
+      const arr = [];
+      for(const f of files){
+        const dataUrl = await new Promise(res=>{
+          const r = new FileReader();
+          r.onload = ()=> res(r.result);
+          r.readAsDataURL(f);
+        });
+        arr.push({name:f.name, dataUrl});
+      }
+      return arr;
+    }
+    document.getElementById('btnUpload').onclick = async ()=>{
+      const inp = document.getElementById('fileInput');
+      if(!inp.files.length) return alert('Bitte Dateien wählen.');
+      const files = await readFilesAsDataUrls(inp.files);
+      const resp = await fetch('/admin/upload', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({files})});
+      const data = await resp.json();
+      if(!data.ok){ alert('Upload fehlgeschlagen: '+(data.error||'unknown')); return; }
+      const list = document.getElementById('uploadList');
+      list.innerHTML = data.urls.map(u=> `<a href="${u}" target="_blank">${u}</a> • <button class="btn" data-url="${u}">als Bild wählen</button>`).join('<br>');
+      list.querySelectorAll('button').forEach(b=>{
+        b.onclick = ()=>{
+          const u = b.getAttribute('data-url');
+          imageUrlInput.value = u;
+          imgEl.src = u;
+          alert('Bild gesetzt: '+u);
+        };
+      });
+    };
 
     // Ask to join as admin
     socket.emit('admin:hello');
