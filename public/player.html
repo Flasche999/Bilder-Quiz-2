@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Spieler · Bilder‑Rätsel Quiz</title>
+  <link rel="stylesheet" href="/style.css"/>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>Spieler · Bilder‑Rätsel Quiz</h1>
+
+    <div id="joinCard" class="card">
+      <div class="row">
+        <div class="col">
+          <label>Dein Spielername</label>
+          <input id="playerName" placeholder="z. B. Dennis"/>
+        </div>
+        <div class="col">
+          <label>Team wählen oder neu eingeben (2–4 Teams gesamt)</label>
+          <input id="teamName" placeholder="Teamname"/>
+        </div>
+        <div class="col" style="align-self:flex-end">
+          <button id="btnJoin" class="btn acc">Beitreten</button>
+        </div>
+      </div>
+      <div class="small">Hinweis: Dein Team‑Partner sieht live deinen Klick‑Marker – andere Teams nicht.</div>
+    </div>
+
+    <div id="gameCard" class="card" style="display:none">
+      <div class="row" style="align-items:center;justify-content:space-between">
+        <div class="tag">Frage: <span id="question">–</span></div>
+        <div class="tag">Team: <span id="myTeamName"></span></div>
+        <div class="tag">Countdown: <span id="countdown">–</span></div>
+        <div class="tag">Status: <span id="status">Warten…</span></div>
+      </div>
+      <div class="hr"></div>
+      <div class="center">
+        <div id="board" class="board">
+          <img id="img" src="" alt=""/>
+          <div id="mask" class="mask" style="display:none"></div>
+          <div id="myMarker" class="marker" style="display:none"></div>
+          <div id="mateMarker" class="marker team" style="display:none"></div>
+          <div id="lockedMarker" class="marker locked" style="display:none"></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="btnLock" class="btn good">✅ Fertig (einloggen)</button>
+        <button id="btnUnlock" class="btn warn" style="display:none">🔓 Änderung</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" style="display:none"></div>
+
+  <script>
+    const socket = io();
+    const joinCard = document.getElementById('joinCard');
+    const gameCard = document.getElementById('gameCard');
+    const playerNameInput = document.getElementById('playerName');
+    const teamNameInput = document.getElementById('teamName');
+    const btnJoin = document.getElementById('btnJoin');
+    const myTeamNameEl = document.getElementById('myTeamName');
+    const countdownEl = document.getElementById('countdown');
+    const statusEl = document.getElementById('status');
+    const imgEl = document.getElementById('img');
+    const boardEl = document.getElementById('board');
+    const maskEl = document.getElementById('mask');
+    const myMarker = document.getElementById('myMarker');
+    const mateMarker = document.getElementById('mateMarker');
+    const lockedMarker = document.getElementById('lockedMarker');
+    const btnLock = document.getElementById('btnLock');
+    const btnUnlock = document.getElementById('btnUnlock');
+    const toast = document.getElementById('toast');
+
+    let my = {id:null, name:'', teamId:null};
+    let canClick = false;
+    let radius = 45;
+    let locked = false;
+    let imageRect = null;
+
+    function showToast(msg){
+      toast.textContent = msg;
+      toast.style.display = 'block';
+      setTimeout(()=> toast.style.display='none', 2500);
+    }
+
+    function boardRect(){
+      const r = boardEl.getBoundingClientRect();
+      return {left:r.left + window.scrollX, top:r.top + window.scrollY, width:r.width, height:r.height};
+    }
+    function px(v){ return v+'px'; }
+    function placeMarkerAt(el, x, y, r){
+      el.style.left = px(x);
+      el.style.top = px(y);
+      el.style.width = px(r*2);
+      el.style.height = px(r*2);
+      el.style.display = 'block';
+    }
+
+    btnJoin.onclick = ()=>{
+      const name = (playerNameInput.value||'').trim();
+      const teamName = (teamNameInput.value||'').trim();
+      if(!name || !teamName){ showToast('Bitte Name und Team ausfüllen.'); return; }
+      socket.emit('player:join', {name, teamName});
+    };
+
+    socket.on('player:accepted', (p)=>{
+      my = p;
+      myTeamNameEl.textContent = p.teamName;
+      joinCard.style.display='none';
+      gameCard.style.display='block';
+    });
+
+    // Round flow
+    socket.on('round:config', (cfg)=>{
+      // Reset state
+      locked=false; canClick=false;
+      myMarker.style.display='none';
+      mateMarker.style.display='none';
+      lockedMarker.style.display='none';
+      maskEl.style.display='none';
+      statusEl.textContent = 'Countdown läuft…';
+
+      imgEl.src = cfg.imageUrl;
+      radius = cfg.radius;
+      countdownEl.textContent = cfg.duration;
+    });
+
+    socket.on('round:tick', (t)=>{
+      countdownEl.textContent = t;
+    });
+
+    socket.on('round:dark', ()=>{
+      maskEl.style.display='block';
+      canClick=true;
+      statusEl.textContent = 'Klicke auf die gesuchte Stelle…';
+    });
+
+    boardEl.addEventListener('click', (e)=>{
+      if(!canClick || locked) return;
+      const r = boardRect();
+      const x = e.pageX - r.left;
+      const y = e.pageY - r.top;
+      placeMarkerAt(myMarker, x, y, radius);
+      socket.emit('player:clickUpdate', {x, y});
+    });
+
+    btnLock.onclick = ()=>{
+      if(myMarker.style.display==='none'){ showToast('Bitte zuerst klicken.'); return; }
+      locked = true; canClick=false;
+      btnLock.style.display='none';
+      btnUnlock.style.display='inline-block';
+      lockedMarker.style.left = myMarker.style.left;
+      lockedMarker.style.top = myMarker.style.top;
+      lockedMarker.style.width = myMarker.style.width;
+      lockedMarker.style.height = myMarker.style.height;
+      lockedMarker.style.display = 'block';
+      socket.emit('player:lock');
+      statusEl.textContent = 'Eingeloggt – warte auf Auflösung…';
+    };
+    btnUnlock.onclick = ()=>{
+      locked = false; canClick=true;
+      btnLock.style.display='inline-block';
+      btnUnlock.style.display='none';
+      lockedMarker.style.display='none';
+      socket.emit('player:unlock');
+      statusEl.textContent = 'Änderung möglich – erneut klicken und einloggen.';
+    };
+
+    // Teammate live marker (hidden from other teams)
+    socket.on('team:mateClick', ({x,y})=>{
+      if(!canClick) return;
+      placeMarkerAt(mateMarker, x, y, radius);
+    });
+
+    // After admin reveals, show all teams
+    socket.on('round:revealGuesses', (teamMarkers)=>{
+      // For simplicity, show teammate marker as-is; other teams are not drawn on player view
+      statusEl.textContent = 'Klicks sichtbar (Team‑weise)';
+    });
+
+    // Reveal target area (unmask circle at target)
+    socket.on('round:revealArea', ({target, radius})=>{
+      // Create a circular clip by hiding part of the mask via CSS radial-gradient
+      maskEl.style.background = `radial-gradient(circle ${radius}px at ${target.x}px ${target.y}px, rgba(0,0,0,0) 0%, rgba(0,0,0,0) ${radius-1}px, rgba(0,0,0,.88) ${radius}px)`;
+    });
+
+    // Show full image again
+    socket.on('round:showFull', ()=>{
+      maskEl.style.display='none';
+      statusEl.textContent = 'Gesamtes Bild sichtbar';
+    });
+
+    // Utility updates
+    socket.on('toast', showToast);
+  </script>
+</body>
+</html>
