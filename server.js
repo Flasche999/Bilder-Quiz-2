@@ -1,4 +1,4 @@
-// server.js – Bilder‑Rätsel Quiz (Node + Express + Socket.IO)
+// server.js – Bilder-Rätsel Quiz (Node + Express + Socket.IO)
 import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
@@ -48,7 +48,9 @@ const state = {
   teams: {},        // teamId -> { id, name, points, colorIdx }
   players: {},      // socket.id -> { id, name, teamId, teamName }
   round: null,
-  history: [] // array of past rounds {ts, question, imageUrl, winners:[teamIds], clicks, target, radius}       // { imageUrl, duration, endAt, radius, target:{x,y}, phase: 'idle|countdown|dark|reveal', locks: {teamId:bool}, clicks:{teamId:{[playerId]:{x,y}}} }
+  turnTeamId: null, // <— aktuell spielendes Team
+  history: [] // array of past rounds {ts, question, imageUrl, winners:[teamIds], clicks, target, radius}
+              // { imageUrl, duration, endAt, radius, target:{x,y}, phase: 'idle|countdown|dark|reveal', locks: {teamId:bool}, clicks:{teamId:{[playerId]:{x,y}}} }
 };
 
 function teamCount(){ return Object.keys(state.teams).length; }
@@ -61,39 +63,71 @@ function getOrCreateTeamByName(name){
   const id = 't'+Math.random().toString(36).slice(2,8);
   const colorIdx = Object.keys(state.teams).length % COLORS.length;
   state.teams[id] = { id, name, points: 0, colorIdx };
+  // Erstes Team wird automatisch "dran"
+  if(!state.turnTeamId) state.turnTeamId = id;
   return state.teams[id];
 }
 
 function broadcastState(){
   io.emit('state', {
     teams: state.teams,
-    players: state.players
+    players: state.players,
+    turnTeamId: state.turnTeamId
   });
 }
 
-// ---- Sockets ----
+// ---- Turn-Helpers ----
+function sortedTeamIds(){
+  return Object.values(state.teams)
+    .sort((a,b)=> a.name.localeCompare(b.name)) // deterministisch
+    .map(t=>t.id);
+}
+function setTurn(teamId){
+  if(!teamId || !state.teams[teamId]) return;
+  state.turnTeamId = teamId;
+  io.emit('turn:update', {teamId});
+  broadcastState();
+}
+function nextTurn(){
+  const ids = sortedTeamIds();
+  if(!ids.length) return;
+  if(!state.turnTeamId) { setTurn(ids[0]); return; }
+  const i = ids.indexOf(state.turnTeamId);
+  const n = ids[(i+1) % ids.length];
+  setTurn(n);
+}
+function prevTurn(){
+  const ids = sortedTeamIds();
+  if(!ids.length) return;
+  if(!state.turnTeamId) { setTurn(ids[0]); return; }
+  const i = ids.indexOf(state.turnTeamId);
+  const p = ids[(i-1+ids.length) % ids.length];
+  setTurn(p);
+}
 
-  // helper: determine winners (teams with any click within radius)
-  function computeWinners(){
-    if(!state.round) return [];
-    const winners = [];
-    const {clicks, target, radius} = state.round;
-    Object.entries(clicks||{}).forEach(([teamId, players])=>{
-      const hit = Object.values(players||{}).some(({x,y})=>{
-        const dx = (x - target.x), dy = (y - target.y);
-        return Math.hypot(dx,dy) <= radius;
-        });
-      if(hit) winners.push(teamId);
+// ---- helper: determine winners (teams with any click within radius)
+function computeWinners(){
+  if(!state.round) return [];
+  const winners = [];
+  const {clicks, target, radius} = state.round;
+  Object.entries(clicks||{}).forEach(([teamId, players])=>{
+    const hit = Object.values(players||{}).some(({x,y})=>{
+      const dx = (x - target.x), dy = (y - target.y);
+      return Math.hypot(dx,dy) <= radius;
     });
-    return winners;
-  }
+    if(hit) winners.push(teamId);
+  });
+  return winners;
+}
 
 
+// ---- Sockets ----
 io.on('connection', (socket)=>{
 
   // Admin hello
   socket.on('admin:hello', ()=>{
-    socket.emit('state', { teams: state.teams, players: state.players });
+    socket.emit('state', { teams: state.teams, players: state.players, turnTeamId: state.turnTeamId });
+    socket.emit('turn:update', {teamId: state.turnTeamId});
     socket.emit('admin:history', state.history);
   });
 
@@ -123,6 +157,13 @@ io.on('connection', (socket)=>{
   socket.on('player:clickUpdate', ({x,y})=>{
     const p = state.players[socket.id];
     if(!p || !state.round) return;
+
+    // <<< Nur das aktuell "dran" Team darf klicken >>>
+    if(state.turnTeamId && p.teamId !== state.turnTeamId){
+      socket.emit('toast', 'Euer Team ist nicht dran.');
+      return;
+    }
+
     state.round.clicks[p.teamId] = state.round.clicks[p.teamId] || {};
     state.round.clicks[p.teamId][p.id] = {x,y};
     // Send only to team room
@@ -134,14 +175,33 @@ io.on('connection', (socket)=>{
   socket.on('player:lock', ()=>{
     const p = state.players[socket.id];
     if(!p || !state.round) return;
+
+    // <<< Nur das aktuell "dran" Team darf locken >>>
+    if(state.turnTeamId && p.teamId !== state.turnTeamId){
+      socket.emit('toast', 'Euer Team ist nicht dran.');
+      return;
+    }
+
     state.round.locks[p.teamId] = true; // if any player of team confirms, the team is locked
   });
 
   socket.on('player:unlock', ()=>{
     const p = state.players[socket.id];
     if(!p || !state.round) return;
+
+    // <<< Nur das aktuell "dran" Team darf entsperren >>>
+    if(state.turnTeamId && p.teamId !== state.turnTeamId){
+      socket.emit('toast', 'Euer Team ist nicht dran.');
+      return;
+    }
+
     state.round.locks[p.teamId] = false;
   });
+
+  // ---- Turn control (Admin) ----
+  socket.on('admin:setTurn', ({teamId})=> setTurn(teamId));
+  socket.on('admin:nextTurn', ()=> nextTurn());
+  socket.on('admin:prevTurn', ()=> prevTurn());
 
   // ---- Admin controls ----
   socket.on('admin:startRound', ({imageUrl, duration, radius, target, question})=>{
@@ -221,5 +281,5 @@ io.on('connection', (socket)=>{
 });
 
 server.listen(PORT, ()=>{
-  console.log('Bilder‑Rätsel Quiz läuft auf http://localhost:'+PORT);
+  console.log('Bilder-Rätsel Quiz läuft auf http://localhost:'+PORT);
 });
