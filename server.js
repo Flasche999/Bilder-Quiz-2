@@ -18,7 +18,10 @@ app.use(express.json({limit:'25mb'}));
 
 const PORT = process.env.PORT || 3000;
 
-// Upload endpoint: expects {files:[{name, dataUrl}]}
+/* ===========================
+   Upload endpoint
+   expects {files:[{name, dataUrl}]}
+=========================== */
 app.post('/admin/upload', async (req, res)=>{
   try{
     const files = req.body && req.body.files;
@@ -42,15 +45,15 @@ app.post('/admin/upload', async (req, res)=>{
   }
 });
 
-
-// ---- Game State ----
+/* ===========================
+   Global Game State
+=========================== */
 const state = {
   teams: {},        // teamId -> { id, name, points, colorIdx }
   players: {},      // socket.id -> { id, name, teamId, teamName }
-  round: null,
-  turnTeamId: null, // <— aktuell spielendes Team
-  history: [] // array of past rounds {ts, question, imageUrl, winners:[teamIds], clicks, target, radius}
-              // { imageUrl, duration, endAt, radius, target:{x,y}, isNormalized?:bool, phase:'idle|countdown|dark|reveal', locks:{teamId:bool}, clicks:{teamId:{[playerId]:{x,y,normalized?:bool}}} }
+  round: null,      // siehe unten
+  turnTeamId: null, // aktuelles Team, das klicken/bestätigen darf
+  history: []       // Vergangene Runden
 };
 
 function teamCount(){ return Object.keys(state.teams).length; }
@@ -63,8 +66,7 @@ function getOrCreateTeamByName(name){
   const id = 't'+Math.random().toString(36).slice(2,8);
   const colorIdx = Object.keys(state.teams).length % COLORS.length;
   state.teams[id] = { id, name, points: 0, colorIdx };
-  // Erstes Team wird automatisch "dran"
-  if(!state.turnTeamId) state.turnTeamId = id;
+  if(!state.turnTeamId) state.turnTeamId = id; // erstes Team ist dran
   return state.teams[id];
 }
 
@@ -76,10 +78,12 @@ function broadcastState(){
   });
 }
 
-// ---- Turn-Helpers ----
+/* ===========================
+   Turn Helpers
+=========================== */
 function sortedTeamIds(){
   return Object.values(state.teams)
-    .sort((a,b)=> a.name.localeCompare(b.name)) // deterministisch
+    .sort((a,b)=> a.name.localeCompare(b.name))
     .map(t=>t.id);
 }
 function setTurn(teamId){
@@ -105,51 +109,74 @@ function prevTurn(){
   setTurn(p);
 }
 
-// ---- helper: determine winners (teams with any click within radius)
-// Hinweis: Funktioniert nur in Pixelraum. Bei normierten Koordinaten
-// (isNormalized=true) wird keine Auto-Ermittlung durchgeführt.
-function computeWinners(){
+/* ===========================
+   Winner / Hit Check Helpers
+=========================== */
+// Trefferprüfung für Pixel-Koordinaten
+function isPixelHit(clickXY, targetXY, radiusPx){
+  if(!clickXY || !targetXY) return false;
+  const dx = clickXY.x - targetXY.x;
+  const dy = clickXY.y - targetXY.y;
+  return Math.hypot(dx, dy) <= (radiusPx || 0);
+}
+
+// Gewinner anhand TEAM-Kreisen (Pixelraum)
+function computeWinnersFromTeamCircles(){
   if(!state.round) return [];
-  if(state.round.isNormalized) {
-    // Ohne Bildmaße kann der Server Radius nicht zuverlässig skalieren.
-    // Lass Winners leer; Admin kann Punkte vergeben.
-    return [];
-  }
+  const R = state.round;
+  if(R.isNormalized) return []; // bei normierten Daten kein Auto-Hit (fehlender Norm-Radius)
   const winners = [];
-  const {clicks, target, radius} = state.round;
-  Object.entries(clicks||{}).forEach(([teamId, players])=>{
-    const hit = Object.values(players||{}).some(({x,y,normalized})=>{
-      if(normalized) return false; // gemischte Daten ignorieren (sollte nicht vorkommen)
-      const dx = (x - target.x), dy = (y - target.y);
-      return Math.hypot(dx,dy) <= radius;
-    });
-    if(hit) winners.push(teamId);
+  Object.entries(R.teamCircles || {}).forEach(([teamId, c])=>{
+    if(c && !c.normalized && isPixelHit(c, R.target, R.radius)) winners.push(teamId);
   });
   return winners;
 }
 
-
-// ---- Sockets ----
+/* ===========================
+   Sockets
+=========================== */
 io.on('connection', (socket)=>{
 
-  // >>> NEU: Sofort den aktuellen Zustand an den frisch verbundenen Socket schicken
+  // Sofort Zustand schicken
   socket.emit('state', { teams: state.teams, players: state.players, turnTeamId: state.turnTeamId });
   socket.emit('turn:update', { teamId: state.turnTeamId });
 
-  // >>> NEU: Spieler können aktiv den Zustand anfragen (z.B. nach Reconnect)
+  // Spieler/Admin rehello (Reconnect)
   socket.on('player:hello', ()=>{
     socket.emit('state', { teams: state.teams, players: state.players, turnTeamId: state.turnTeamId });
     socket.emit('turn:update', { teamId: state.turnTeamId });
+    if(state.round){
+      socket.emit('round:config', {
+        imageUrl: state.round.imageUrl,
+        duration: state.round.duration,
+        radius: state.round.radius,
+        question: state.round.question,
+        target: state.round.target,
+        isNormalized: !!state.round.isNormalized
+      });
+      // aktuelle Phase pushen
+      if(state.round.phase==='dark') socket.emit('round:dark');
+      if(state.round.revealClicks) socket.emit('round:revealTeamCircles', { reveal:true, teamCircles: state.round.teamCircles });
+    }
   });
 
-  // Admin hello
   socket.on('admin:hello', ()=>{
     socket.emit('state', { teams: state.teams, players: state.players, turnTeamId: state.turnTeamId });
     socket.emit('turn:update', {teamId: state.turnTeamId});
     socket.emit('admin:history', state.history);
+    if(state.round){
+      socket.emit('round:config', {
+        imageUrl: state.round.imageUrl,
+        duration: state.round.duration,
+        radius: state.round.radius,
+        question: state.round.question,
+        target: state.round.target,
+        isNormalized: !!state.round.isNormalized
+      });
+    }
   });
 
-  // Player joins with name + team
+  /* ---------- Player Join ---------- */
   socket.on('player:join', ({name, teamName})=>{
     if(!name || !teamName) return;
     let team = getOrCreateTeamByName(teamName.trim());
@@ -158,7 +185,7 @@ io.on('connection', (socket)=>{
       return;
     }
 
-    // Enforce max 2 players per team
+    // MAX 2 Spieler pro Team
     const currentPlayers = Object.values(state.players).filter(pp => pp.teamId === team.id).length;
     if(currentPlayers >= 2){
       socket.emit('toast', `Team "${team.name}" ist voll (max. 2 Spieler). Bitte anderes Team wählen oder neues Team anlegen.`);
@@ -166,77 +193,126 @@ io.on('connection', (socket)=>{
     }
 
     state.players[socket.id] = { id: socket.id, name: name.trim(), teamId: team.id, teamName: team.name };
-    socket.join(team.id); // room per team for private updates
+    socket.join(team.id); // team room
     socket.emit('player:accepted', state.players[socket.id]);
     broadcastState();
   });
 
-  // Live click updates (teammates only) + admin overlay
-  socket.on('player:clickUpdate', ({x,y,normalized})=>{
+  /* =======================================================
+     >>> NEU: TEAM-Klick-Logik (ein Kreis pro Team, gemeinsam)
+     Events:
+      - team:setCircle  {x,y,normalized?}
+      - team:confirm    ()
+      - team:unconfirm  ()   (optional)
+      - admin:revealTeamCircles / admin:hideTeamCircles
+      - admin:clearTeamCircles
+      - admin:newRound  ({imageUrl, duration, radius, target, question})
+  ======================================================= */
+
+  // Ein Team-Kreis setzen/versetzen (beide Spieler dürfen)
+  socket.on('team:setCircle', ({x, y, normalized})=>{
     const p = state.players[socket.id];
     if(!p || !state.round) return;
 
-    // <<< Nur das aktuell "dran" Team darf klicken >>>
+    // Nur das "dran" Team darf seinen Kreis setzen
     if(state.turnTeamId && p.teamId !== state.turnTeamId){
       socket.emit('toast', 'Euer Team ist nicht dran.');
       return;
     }
 
-    state.round.clicks[p.teamId] = state.round.clicks[p.teamId] || {};
-    state.round.clicks[p.teamId][p.id] = {x, y, normalized: !!normalized};
+    const R = state.round;
+    R.teamCircles = R.teamCircles || {};
+    R.teamLocked  = R.teamLocked  || {};
 
-    // Send only to team room (Teammate-Preview)
-    socket.to(p.teamId).emit('team:mateClick', {x, y, normalized: !!normalized});
+    // Wenn Team bereits bestätigt hat, darf es nicht mehr ändern
+    if(R.teamLocked[p.teamId]){
+      socket.emit('toast', 'Euer Team ist bereits eingeloggt.');
+      return;
+    }
 
-    // Admin overlay sees all clicks
-    io.emit('admin:liveClick', {teamId:p.teamId, playerId:p.id, x, y, normalized: !!normalized});
+    R.teamCircles[p.teamId] = { x, y, normalized: !!normalized };
+
+    // Vorschau an Team-Mate (schwach/privat), Admin sieht, dass Kreis gesetzt wurde
+    socket.to(p.teamId).emit('team:circlePreview', { x, y, normalized: !!normalized });
+    io.emit('admin:teamCircleSet', { teamId: p.teamId });
   });
 
-  socket.on('player:lock', ()=>{
+  // Team bestätigt (einloggen)
+  socket.on('team:confirm', ()=>{
     const p = state.players[socket.id];
     if(!p || !state.round) return;
 
-    // <<< Nur das aktuell "dran" Team darf locken >>>
+    // Nur das "dran" Team darf bestätigen
     if(state.turnTeamId && p.teamId !== state.turnTeamId){
       socket.emit('toast', 'Euer Team ist nicht dran.');
       return;
     }
 
-    state.round.locks[p.teamId] = true; // if any player of team confirms, the team is locked
-  });
+    const R = state.round;
+    R.teamCircles = R.teamCircles || {};
+    R.teamLocked  = R.teamLocked  || {};
 
-  socket.on('player:unlock', ()=>{
-    const p = state.players[socket.id];
-    if(!p || !state.round) return;
-
-    // <<< Nur das aktuell "dran" Team darf entsperren >>>
-    if(state.turnTeamId && p.teamId !== state.turnTeamId){
-      socket.emit('toast', 'Euer Team ist nicht dran.');
+    if(!R.teamCircles[p.teamId]){
+      socket.emit('toast', 'Bitte zuerst eure Position setzen.');
       return;
     }
+    if(R.teamLocked[p.teamId]) return; // schon gelockt
 
-    state.round.locks[p.teamId] = false;
+    R.teamLocked[p.teamId] = true;
+
+    // Admin-UI: Team eingeloggt anzeigen
+    io.emit('admin:teamLocked', { teamId: p.teamId });
+
+    // Auto +5 Punkte bei Treffer (nur Pixel-Koordinaten)
+    if(!R.isNormalized){
+      const circle = R.teamCircles[p.teamId];
+      if(isPixelHit(circle, R.target, R.radius)){
+        const t = state.teams[p.teamId];
+        if(t){
+          t.points = (t.points||0) + 5;
+          broadcastState(); // Punkte an alle
+          io.emit('score:autoBonus', { teamId: p.teamId, delta: 5 });
+        }
+      }
+    }
   });
 
-  // ---- Turn control (Admin) ----
+  // Optional: Team kann vor Reveal wieder entsperren
+  socket.on('team:unconfirm', ()=>{
+    const p = state.players[socket.id];
+    if(!p || !state.round) return;
+    if(state.turnTeamId && p.teamId !== state.turnTeamId) return;
+
+    const R = state.round;
+    if(R.teamLocked && R.teamLocked[p.teamId]){
+      R.teamLocked[p.teamId] = false;
+      io.emit('admin:teamUnlocked', { teamId: p.teamId });
+    }
+  });
+
+  /* ---------- Admin: Turn Control ---------- */
   socket.on('admin:setTurn', ({teamId})=> setTurn(teamId));
   socket.on('admin:nextTurn', ()=> nextTurn());
   socket.on('admin:prevTurn', ()=> prevTurn());
 
-  // ---- Admin controls ----
+  /* ---------- Admin: Runde starten ---------- */
+  // target: {x,y, normalized?}; radius: Pixel-Radius (für Pixelziele)
   socket.on('admin:startRound', ({imageUrl, duration, radius, target, question})=>{
     state.round = {
       imageUrl: imageUrl || '/images/sample.jpg',
       duration: Math.max(3, parseInt(duration||15,10)),
-      radius: Math.max(5, Math.min(200, parseInt(radius||45,10))),
+      radius: Math.max(5, Math.min(200, parseInt(radius||45,10))), // Pixel
       target: (target && target.x!=null) ? target : {x:100,y:100},
-      isNormalized: !!(target && target.normalized), // <<< NEU
+      isNormalized: !!(target && target.normalized), // true = target.x/y sind 0..1 (Server auto-Hit aus)
       question: question || '',
       phase: 'countdown',
-      clicks: {},
-      locks: {}
+      // <<< NEU: Team-Kreise/Locks/Reveal-Flag >>>
+      teamCircles: {},           // teamId -> {x,y,normalized?}
+      teamLocked: {},            // teamId -> bool
+      revealClicks: false
     };
-    // Send config to all players (inkl. normalized-Info)
+
+    // Round-Config an alle
     io.emit('round:config', { 
       imageUrl: state.round.imageUrl,
       duration: state.round.duration,
@@ -245,7 +321,8 @@ io.on('connection', (socket)=>{
       target: state.round.target,
       isNormalized: !!state.round.isNormalized
     });
-    // Countdown ticks
+
+    // Countdown → Dunkelphase (Spieler zeigen Frage erst da)
     let t = state.round.duration;
     const tickId = setInterval(()=>{
       t -= 1;
@@ -253,35 +330,58 @@ io.on('connection', (socket)=>{
       io.emit('round:tick', t);
       if(t<=0){
         clearInterval(tickId);
+        if(!state.round) return;
         state.round.phase='dark';
-        // Players go dark; admin does not
-        io.emit('round:dark');
+        io.emit('round:dark'); // Spieler zeigen ab jetzt die Frage
       }
     }, 1000);
     io.emit('round:tick', t);
   });
 
-  socket.on('admin:revealGuesses', ()=>{
+  /* ---------- Admin: Klicks anzeigen/ausblenden ---------- */
+  socket.on('admin:revealTeamCircles', ()=>{
     if(!state.round) return;
-    state.round.phase='reveal';
-    // Auf Spieler-Views: jetzt alle Team-Klicks sichtbar
-    io.emit('round:revealGuesses', state.round.clicks);
+    state.round.revealClicks = true;
+    io.emit('round:revealTeamCircles', { reveal:true, teamCircles: state.round.teamCircles || {} });
   });
 
+  socket.on('admin:hideTeamCircles', ()=>{
+    if(!state.round) return;
+    state.round.revealClicks = false;
+    io.emit('round:revealTeamCircles', { reveal:false });
+  });
+
+  /* ---------- Admin: Klicks entfernen ---------- */
+  socket.on('admin:clearTeamCircles', ()=>{
+    if(!state.round) return;
+    state.round.teamCircles = {};
+    state.round.teamLocked  = {};
+    io.emit('round:clearTeamCircles');
+  });
+
+  /* ---------- Admin: Reveal Zielbereich / Gewinner berechnen ---------- */
   socket.on('admin:revealArea', ({autoNext, delayMs})=>{
     if(!state.round) return;
     const { target, radius, isNormalized } = state.round;
     io.emit('round:revealArea', { target, radius, isNormalized: !!isNormalized });
-    // compute winners & save to history
-    const winners = computeWinners();
-    state.history.push({ ts: Date.now(), question: state.round.question, imageUrl: state.round.imageUrl, winners, clicks: state.round.clicks, target: state.round.target, radius: state.round.radius });
+
+    // Gewinner bestimmen (nur Pixel-Modus)
+    const winners = computeWinnersFromTeamCircles();
+    state.history.push({
+      ts: Date.now(),
+      question: state.round.question,
+      imageUrl: state.round.imageUrl,
+      winners,
+      teamCircles: state.round.teamCircles,
+      target: state.round.target,
+      radius: state.round.radius
+    });
     io.emit('admin:history', state.history);
+
     if(autoNext){
       const ms = Math.max(0, parseInt(delayMs||3000,10));
       setTimeout(()=>{ io.emit('round:showFull'); }, Math.min(ms, 5000));
-      setTimeout(()=>{
-        io.emit('admin:requestNext'); // admin client moves playlist to next
-      }, Math.max(ms, 1500) + 2000);
+      setTimeout(()=>{ io.emit('admin:requestNext'); }, Math.max(ms, 1500) + 2000);
     }
   });
 
@@ -290,6 +390,7 @@ io.on('connection', (socket)=>{
     io.emit('round:showFull');
   });
 
+  /* ---------- Admin: Punkte manuell anpassen ---------- */
   socket.on('admin:adjustPoints', ({teamId, delta})=>{
     const t = state.teams[teamId];
     if(!t) return;
@@ -297,12 +398,64 @@ io.on('connection', (socket)=>{
     broadcastState();
   });
 
+  /* ---------- Admin: Neue Runde (Reset + optional neue Daten) ---------- */
+  socket.on('admin:newRound', ({imageUrl, duration, radius, target, question})=>{
+    // vergangene Runde ggf. schließen
+    if(state.round){
+      state.history.push({
+        ts: Date.now(),
+        question: state.round.question,
+        imageUrl: state.round.imageUrl,
+        winners: [],
+        teamCircles: state.round.teamCircles,
+        target: state.round.target,
+        radius: state.round.radius
+      });
+      io.emit('admin:history', state.history);
+    }
+
+    // neue Runde starten (gleiche Logik wie startRound)
+    state.round = {
+      imageUrl: imageUrl || '/images/sample.jpg',
+      duration: Math.max(3, parseInt(duration||15,10)),
+      radius: Math.max(5, Math.min(200, parseInt(radius||45,10))),
+      target: (target && target.x!=null) ? target : {x:100,y:100},
+      isNormalized: !!(target && target.normalized),
+      question: question || '',
+      phase: 'countdown',
+      teamCircles: {},
+      teamLocked: {},
+      revealClicks: false
+    };
+
+    io.emit('round:config', { 
+      imageUrl: state.round.imageUrl,
+      duration: state.round.duration,
+      radius: state.round.radius,
+      question: state.round.question,
+      target: state.round.target,
+      isNormalized: !!state.round.isNormalized
+    });
+
+    let t = state.round.duration;
+    const tickId = setInterval(()=>{
+      t -= 1;
+      if(!state.round || state.round.phase!=='countdown'){ clearInterval(tickId); return; }
+      io.emit('round:tick', t);
+      if(t<=0){
+        clearInterval(tickId);
+        if(!state.round) return;
+        state.round.phase='dark';
+        io.emit('round:dark');
+      }
+    }, 1000);
+    io.emit('round:tick', t);
+  });
+
+  /* ---------- Disconnect ---------- */
   socket.on('disconnect', ()=>{
-    // clean player
     if(state.players[socket.id]){
-      const teamId = state.players[socket.id].teamId;
       delete state.players[socket.id];
-      // keep teams persistent (no auto-delete to preserve scores)
       broadcastState();
     }
   });
