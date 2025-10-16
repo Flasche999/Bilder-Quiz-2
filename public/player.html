@@ -184,6 +184,11 @@
       el.style.display = 'block';
     }
 
+    // Alle Fremdmarker (".marker.other") entfernen
+    function clearOtherMarkers(){
+      document.querySelectorAll('.marker.other').forEach(m=>m.remove());
+    }
+
     // ---- Turn-Helpers (nur aktuelles Team darf klicken) ----
     function isMyTurn(){
       return !!(my && my.teamId && __turnTeamId && my.teamId === __turnTeamId);
@@ -247,6 +252,7 @@
       mateMarker.style.display='none';
       lockedMarker.style.display='none';
       maskEl.style.display='none';
+      clearOtherMarkers();
       statusEl.textContent = 'Countdown läuft…';
 
       imgEl.src = cfg.imageUrl;
@@ -263,6 +269,7 @@
 
     socket.on('round:dark', ()=>{
       maskEl.style.display='block';
+      maskEl.style.background = '#000'; // 100% schwarz
       // Nur klicken, wenn eigenes Team dran ist
       canClick = isMyTurn();
       statusEl.textContent = canClick ? 'Klicke auf die gesuchte Stelle…' : 'Warten – anderes Team ist dran…';
@@ -333,18 +340,41 @@
       placeMarkerAt(mateMarker, px, py, radius);
     });
 
-    // Nach Auflösung
+    // 👀 Admin drückt "Klicks zeigen": ALLE Teams/Live-Klicks anzeigen (über schwarzer Maske)
     socket.on('round:revealGuesses', (teamMarkers)=>{
-      statusEl.textContent = 'Klicks sichtbar (Team-weise)';
+      statusEl.textContent = 'Alle Klicks sichtbar';
+      clearOtherMarkers();
+
+      const teams = window.__stateTeams || {};
+      const rect = imgEl.getBoundingClientRect();
+
+      Object.entries(teamMarkers || {}).forEach(([teamId, playersObj])=>{
+        const color = (teams[teamId] ? COLORS[teams[teamId].colorIdx || 0] : '#ccc');
+        Object.entries(playersObj || {}).forEach(([pid, point])=>{
+          let {x,y,normalized} = point || {};
+          if (normalized || (x<=1 && y<=1)) { // normalisierte Koordinaten → in Pixel
+            x = x * rect.width;
+            y = y * rect.height;
+          }
+          const mark = document.createElement('div');
+          mark.className = 'marker other';
+          mark.style.borderColor = color;
+          mark.style.left = `${x}px`;
+          mark.style.top = `${y}px`;
+          mark.style.width = `${radius*2}px`;
+          mark.style.height = `${radius*2}px`;
+          boardEl.appendChild(mark);
+        });
+      });
     });
 
-    // Reveal – unterstützt normalized Target
+    // Reveal – unterstützt normalized Target; Außenbereich bleibt 100% schwarz
     socket.on('round:revealArea', ({target, radius, isNormalized})=>{
       const rect = imgEl.getBoundingClientRect();
       const tx = (isNormalized || roundIsNormalized) ? target.x * rect.width  : target.x;
       const ty = (isNormalized || roundIsNormalized) ? target.y * rect.height : target.y;
       maskEl.style.background = `radial-gradient(circle ${radius}px at ${tx}px ${ty}px,
-        rgba(0,0,0,0) 0%, rgba(0,0,0,0) ${radius-1}px, rgba(0,0,0,.88) ${radius}px)`;
+        rgba(0,0,0,0) 0%, rgba(0,0,0,0) ${radius-1}px, rgba(0,0,0,1) ${radius}px)`;
     });
 
     socket.on('round:showFull', ()=>{
@@ -352,6 +382,8 @@
       statusEl.textContent = 'Gesamtes Bild sichtbar';
       canClick = false;
       updateBoardInteractivity();
+      // Marker anderer Teams können bleiben – optional:
+      // clearOtherMarkers();
     });
 
     // Utility updates
