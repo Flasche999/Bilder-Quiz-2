@@ -69,13 +69,19 @@ button:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
   cursor:not-allowed;opacity:.65
 }
 
+/* 100% schwarze Dunkelphase; Marker liegen darüber */
 .mask{
-  position:absolute;inset:0;background:rgba(0,0,0,.88);pointer-events:none;
+  position:absolute;inset:0;
+  background:#000;              /* voll schwarz */
+  pointer-events:none;
+  opacity:1;
+  z-index:10;                   /* unter Markern, über Bild */
 }
 
 .marker{
   position:absolute;transform:translate(-50%,-50%);
-  border:2px solid var(--acc);border-radius:50%;pointer-events:none
+  border:2px solid var(--acc);border-radius:50%;pointer-events:none;
+  z-index:20;                   /* über der Maske */
 }
 .marker.team{border-style:dashed}
 .marker.locked{border-color:var(--good)}
@@ -109,6 +115,5 @@ button:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
 .nowrap{white-space:nowrap}
 .flex-between{display:flex;align-items:center;justify-content:space-between}
 
-/* Overlay canvas (admin) – ensure it sits above image but below UI */
-#overlay{z-index:2}
-#target,#myMarker,#mateMarker,#lockedMarker,#mask{z-index:3}
+/* Overlay canvas (admin) – sits above image, below UI */
+#overlay{z-index:5}
