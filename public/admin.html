@@ -153,6 +153,7 @@
 
   <script>
     const socket = io();
+    socket.on('connect_error', (err)=> console.error('Socket connect_error:', err));
     const COLORS = ["#4da3ff","#ff4d6d","#22c55e","#eab308"]; // bis zu 4 Teams
     let playlist = [];
     let roundIdx = 0;
@@ -198,6 +199,9 @@
       el.style.display = 'block';
     }
 
+    // Overlay Element (einmalig!)
+    const overlay = document.getElementById('overlay');
+
     // Marker für evtl. normalisierte Targets passend anzeigen
     function displayTargetMarker(t){
       if(!t || t.x==null || t.y==null){ targetEl.style.display='none'; return; }
@@ -214,8 +218,6 @@
     radiusInput.addEventListener('input',()=>{
       radius = parseInt(radiusInput.value||'45',10);
       if(targetEl.style.display!=='none'){
-        const rect = targetEl.getBoundingClientRect();
-        // Nur Größe neu setzen; Position bleibt zentriert
         targetEl.style.width = px(radius*2);
         targetEl.style.height = px(radius*2);
       }
@@ -310,7 +312,6 @@
     }
 
     /* ========= Overlay ========= */
-    const overlay = document.getElementById('overlay');
     function fitOverlay(){
       const r = boardEl.getBoundingClientRect();
       overlay.width = r.width;
@@ -621,10 +622,18 @@
     // Admin-Handshake
     socket.emit('admin:hello');
 
-    // Overlay erstmal passend setzen
-    const overlay = document.getElementById('overlay');
-    fitOverlay();
-    drawOverlay();
+    // Overlay initial passend setzen
+    function initOverlaySize(){
+      fitOverlay();
+      drawOverlay();
+    }
+    // Sicherstellen, dass Größen nach Image-Load & DOM-Ready passen
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      initOverlaySize();
+    } else {
+      window.addEventListener('DOMContentLoaded', initOverlaySize);
+    }
+    imgEl.addEventListener('load', initOverlaySize);
   </script>
 </body>
 </html>
