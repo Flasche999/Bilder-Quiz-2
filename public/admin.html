@@ -137,7 +137,8 @@
     const teamsEl = document.getElementById('teams');
     const lobbyEl = document.getElementById('lobby');
 
-    let target = {x:0,y:0};
+    // WICHTIG: target = "raw" (so wie an Server gesendet): entweder Pixel oder {normalized:true}
+    let target = {x:0,y:0};     // raw (Pixel oder normalisiert – je nachdem)
     let radius = parseInt(radiusInput.value,10);
 
     function boardRect(){
@@ -153,21 +154,40 @@
       el.style.display = 'block';
     }
 
-    imgEl.addEventListener('load', ()=>{ targetEl.style.display='none'; });
+    // Marker für evtl. normalisierte Targets passend anzeigen
+    function displayTargetMarker(t){
+      if(!t || t.x==null || t.y==null){ targetEl.style.display='none'; return; }
+      fitOverlay();
+      let dx = t.x, dy = t.y;
+      if (t.normalized || (dx <= 1 && dy <= 1)) {
+        dx = dx * overlay.width;
+        dy = dy * overlay.height;
+      }
+      placeMarkerAt(targetEl, dx, dy, radius);
+    }
+
+    imgEl.addEventListener('load', ()=>{ 
+      // Bei Bildwechsel ggf. normalisiertes target neu in Pixel umrechnen
+      displayTargetMarker(target);
+    });
     radiusInput.addEventListener('input',()=>{
       radius = parseInt(radiusInput.value||'45',10);
       if(targetEl.style.display!=='none'){
         targetEl.style.width = px(radius*2);
         targetEl.style.height = px(radius*2);
       }
+      drawOverlay();
     });
-    imageUrlInput.addEventListener('change', ()=>{ imgEl.src = imageUrlInput.value || '/images/sample.jpg'; });
+    imageUrlInput.addEventListener('change', ()=>{ 
+      imgEl.src = imageUrlInput.value || '/images/sample.jpg'; 
+    });
 
+    // Admin setzt Ziel per Klick (immer als Pixel-Rohwert senden)
     boardEl.addEventListener('click', (e)=>{
       const r = boardRect();
       const x = e.pageX - r.left;
       const y = e.pageY - r.top;
-      target = {x, y};
+      target = {x, y}; // überschreibt ggf. normalisierte Playlist-Targets
       placeMarkerAt(targetEl, x, y, radius);
     });
 
@@ -177,7 +197,7 @@
         imageUrl: imageUrlInput.value || '/images/sample.jpg',
         duration: Math.max(3, parseInt(countdownInput.value||'15',10)),
         radius: Math.max(5, Math.min(200, parseInt(radiusInput.value||'45',10))),
-        target,
+        target, // kann Pixel ODER normalisiert sein
         question: (document.getElementById('question').value || '')
       };
       socket.emit('admin:startRound', payload);
@@ -241,10 +261,10 @@
       overlay.width = r.width;
       overlay.height = r.height;
     }
-    window.addEventListener('resize', fitOverlay);
-    new ResizeObserver(fitOverlay).observe(boardEl);
+    window.addEventListener('resize', ()=>{ fitOverlay(); drawOverlay(); });
+    new ResizeObserver(()=>{ fitOverlay(); drawOverlay(); }).observe(boardEl);
 
-    // Overlay zeichnen (Kreise + Labels)
+    // Overlay zeichnen (Kreise + Labels) – versteht normalisierte Klicks
     function drawOverlay(){
       const ctx = overlay.getContext('2d');
       ctx.clearRect(0,0,overlay.width,overlay.height);
@@ -256,7 +276,13 @@
       teamIds.forEach((tid, idx)=>{
         const color = COLORS[idx % COLORS.length];
         const teamClicks = adminOverlay.clicks[tid] || {};
-        Object.entries(teamClicks).forEach(([pid, {x,y}])=>{
+        Object.entries(teamClicks).forEach(([pid, click])=>{
+          let {x,y,normalized} = click || {};
+          // Falls normalisiert (oder <=1), in Pixel umrechnen
+          if (normalized || (x<=1 && y<=1)) {
+            x = x * overlay.width;
+            y = y * overlay.height;
+          }
           ctx.beginPath();
           ctx.strokeStyle = color;
           ctx.lineWidth = 2;
@@ -304,8 +330,11 @@
           questionInput.value = (playlist[0].question || '');
           imgEl.src = imageUrlInput.value;
           if(playlist[0].target){
-            target = playlist[0].target;
-            placeMarkerAt(targetEl, target.x, target.y, parseInt(radiusInput.value,10));
+            target = playlist[0].target;             // RAW (evtl. normalized)
+            displayTargetMarker(target);              // Marker in Pixel anzeigen
+          }else{
+            target = {x:0,y:0};
+            targetEl.style.display='none';
           }
         }
         alert('Playlist geladen: '+playlist.length+' Runden');
@@ -321,7 +350,7 @@
         imageUrl: imageUrlInput.value || '/images/sample.svg',
         duration: Math.max(3, parseInt(countdownInput.value||'15',10)),
         radius: Math.max(5, Math.min(200, parseInt(radiusInput.value||'45',10))),
-        target,
+        target, // RAW (Pixel oder normalisiert)
         question: questionInput.value || ''
       };
       socket.emit('admin:startRound', payload);
@@ -335,11 +364,16 @@
       imageUrlInput.value = r.imageUrl || imageUrlInput.value;
       countdownInput.value = r.duration || countdownInput.value;
       radiusInput.value = r.radius || radiusInput.value;
+      radius = parseInt(radiusInput.value,10);
       questionInput.value = r.question || '';
       imgEl.src = imageUrlInput.value;
-      target = r.target || {x:0,y:0};
-      if(r.target) placeMarkerAt(targetEl, r.target.x, r.target.y, parseInt(radiusInput.value,10));
-      else targetEl.style.display='none';
+      if(r.target){
+        target = r.target;               // RAW übernehmen
+        displayTargetMarker(target);     // Anzeige in Pixel
+      }else{
+        target = {x:0,y:0};
+        targetEl.style.display='none';
+      }
       updateRoundProgress();
     };
 
@@ -385,12 +419,14 @@
       renderTurn(s);
       fitOverlay();
       drawOverlay();
+      // Falls ein normalisiertes target gesetzt ist, nach Resize neu zeichnen
+      displayTargetMarker(target);
     });
 
-    // Live-Clicks fürs Admin-Overlay
-    socket.on('admin:liveClick', ({teamId, playerId, x, y})=>{
+    // Live-Clicks fürs Admin-Overlay (mit normalized-Flag)
+    socket.on('admin:liveClick', ({teamId, playerId, x, y, normalized})=>{
       adminOverlay.clicks[teamId] = adminOverlay.clicks[teamId] || {};
-      adminOverlay.clicks[teamId][playerId] = {x,y};
+      adminOverlay.clicks[teamId][playerId] = {x,y,normalized: !!normalized};
       drawOverlay();
     });
 
