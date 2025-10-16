@@ -50,7 +50,7 @@ const state = {
   round: null,
   turnTeamId: null, // <— aktuell spielendes Team
   history: [] // array of past rounds {ts, question, imageUrl, winners:[teamIds], clicks, target, radius}
-              // { imageUrl, duration, endAt, radius, target:{x,y}, phase: 'idle|countdown|dark|reveal', locks: {teamId:bool}, clicks:{teamId:{[playerId]:{x,y}}} }
+              // { imageUrl, duration, endAt, radius, target:{x,y}, isNormalized?:bool, phase:'idle|countdown|dark|reveal', locks:{teamId:bool}, clicks:{teamId:{[playerId]:{x,y,normalized?:bool}}} }
 };
 
 function teamCount(){ return Object.keys(state.teams).length; }
@@ -106,12 +106,20 @@ function prevTurn(){
 }
 
 // ---- helper: determine winners (teams with any click within radius)
+// Hinweis: Funktioniert nur in Pixelraum. Bei normierten Koordinaten
+// (isNormalized=true) wird keine Auto-Ermittlung durchgeführt.
 function computeWinners(){
   if(!state.round) return [];
+  if(state.round.isNormalized) {
+    // Ohne Bildmaße kann der Server Radius nicht zuverlässig skalieren.
+    // Lass Winners leer; Admin kann Punkte vergeben.
+    return [];
+  }
   const winners = [];
   const {clicks, target, radius} = state.round;
   Object.entries(clicks||{}).forEach(([teamId, players])=>{
-    const hit = Object.values(players||{}).some(({x,y})=>{
+    const hit = Object.values(players||{}).some(({x,y,normalized})=>{
+      if(normalized) return false; // gemischte Daten ignorieren (sollte nicht vorkommen)
       const dx = (x - target.x), dy = (y - target.y);
       return Math.hypot(dx,dy) <= radius;
     });
@@ -154,7 +162,7 @@ io.on('connection', (socket)=>{
   });
 
   // Live click updates (teammates only) + admin overlay
-  socket.on('player:clickUpdate', ({x,y})=>{
+  socket.on('player:clickUpdate', ({x,y,normalized})=>{
     const p = state.players[socket.id];
     if(!p || !state.round) return;
 
@@ -165,11 +173,13 @@ io.on('connection', (socket)=>{
     }
 
     state.round.clicks[p.teamId] = state.round.clicks[p.teamId] || {};
-    state.round.clicks[p.teamId][p.id] = {x,y};
-    // Send only to team room
-    socket.to(p.teamId).emit('team:mateClick', {x,y});
+    state.round.clicks[p.teamId][p.id] = {x, y, normalized: !!normalized};
+
+    // Send only to team room (Teammate-Preview)
+    socket.to(p.teamId).emit('team:mateClick', {x, y, normalized: !!normalized});
+
     // Admin overlay sees all clicks
-    io.emit('admin:liveClick', {teamId:p.teamId, playerId:p.id, x, y});
+    io.emit('admin:liveClick', {teamId:p.teamId, playerId:p.id, x, y, normalized: !!normalized});
   });
 
   socket.on('player:lock', ()=>{
@@ -209,14 +219,22 @@ io.on('connection', (socket)=>{
       imageUrl: imageUrl || '/images/sample.jpg',
       duration: Math.max(3, parseInt(duration||15,10)),
       radius: Math.max(5, Math.min(200, parseInt(radius||45,10))),
-      target: target && target.x ? target : {x:100,y:100},
+      target: (target && target.x!=null) ? target : {x:100,y:100},
+      isNormalized: !!(target && target.normalized), // <<< NEU
       question: question || '',
       phase: 'countdown',
       clicks: {},
       locks: {}
     };
-    // Send config to all players
-    io.emit('round:config', { imageUrl: state.round.imageUrl, duration: state.round.duration, radius: state.round.radius, question: state.round.question });
+    // Send config to all players (inkl. normalized-Info)
+    io.emit('round:config', { 
+      imageUrl: state.round.imageUrl,
+      duration: state.round.duration,
+      radius: state.round.radius,
+      question: state.round.question,
+      target: state.round.target,
+      isNormalized: !!state.round.isNormalized
+    });
     // Countdown ticks
     let t = state.round.duration;
     const tickId = setInterval(()=>{
@@ -242,8 +260,8 @@ io.on('connection', (socket)=>{
 
   socket.on('admin:revealArea', ({autoNext, delayMs})=>{
     if(!state.round) return;
-    const { target, radius } = state.round;
-    io.emit('round:revealArea', { target, radius });
+    const { target, radius, isNormalized } = state.round;
+    io.emit('round:revealArea', { target, radius, isNormalized: !!isNormalized });
     // compute winners & save to history
     const winners = computeWinners();
     state.history.push({ ts: Date.now(), question: state.round.question, imageUrl: state.round.imageUrl, winners, clicks: state.round.clicks, target: state.round.target, radius: state.round.radius });
