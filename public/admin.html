@@ -6,6 +6,33 @@
   <title>Admin · Bilder-Rätsel Quiz</title>
   <link rel="stylesheet" href="/style.css"/>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    /* Kleine Badges für Status */
+    .badge{display:inline-block;padding:2px 6px;border-radius:8px;font-size:12px;margin-left:6px;border:1px solid rgba(255,255,255,.15);}
+    .badge.ok{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.35);color:#a7f3d0;}
+    .badge.warn{background:rgba(234,179,8,.12);border-color:rgba(234,179,8,.35);color:#fde68a;}
+    .badge.muted{background:rgba(148,163,184,.12);border-color:rgba(148,163,184,.35);color:#cbd5e1;}
+    .score-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0;}
+    .tag{border:1px solid rgba(255,255,255,.1);padding:4px 8px;border-radius:8px;display:inline-flex;align-items:center;gap:6px}
+    .btn{padding:6px 10px;border:1px solid rgba(255,255,255,.15);background:#111827;color:#e5e7eb;border-radius:10px;cursor:pointer}
+    .btn.acc{background:#0b3b2f}
+    .btn.good{background:#12391f}
+    .btn.warn{background:#3a2d0b}
+    .btn.bad{background:#3a1212}
+    .hr{height:1px;background:rgba(255,255,255,.08);margin:10px 0}
+    .board img{max-width:100%;display:block;border-radius:12px}
+    .marker{position:absolute;border:2px dashed #eab308;border-radius:999px;pointer-events:none;mix-blend-mode:screen}
+    .marker.locked{border-style:solid}
+    .container{max-width:1100px;margin:18px auto;padding:0 12px}
+    .card{background:#0b0f19;border:1px solid rgba(255,255,255,.07);border-radius:14px;padding:14px;margin:10px 0}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .col{flex:1 1 320px}
+    .small{opacity:.8;font-size:13px}
+    label{display:block;margin-bottom:6px;opacity:.9}
+    input[type="text"], input[type="number"], textarea{
+      width:100%;padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:#0b1120;color:#e5e7eb
+    }
+  </style>
 </head>
 <body>
   <div class="container">
@@ -93,14 +120,18 @@
           </div>
           <div class="small">Tipp: Klicke in das Bild, um Zielkoordinaten zu setzen. Der Kreis zeigt den Radius.</div>
         </div>
-        <div style="min-width:280px" class="col">
+        <div style="min-width:320px" class="col">
           <label>Frage</label>
-          <input id="question" placeholder="Frage für die Runde (wird Spielern angezeigt)"/>
+          <input id="question" placeholder="Frage für die Runde (wird Spielern in der Dunkelphase angezeigt)"/>
           <div class="hr"></div>
           <label>Rundensteuerung</label>
           <div class="row">
             <button id="btnStart" class="btn acc">▶️ Runde starten</button>
-            <button id="btnRevealGuesses" class="btn">👀 Klicks zeigen</button>
+            <button id="btnRevealCircles" class="btn">👀 Klick-Kreise anzeigen</button>
+            <button id="btnHideCircles" class="btn">🙈 Klick-Kreise ausblenden</button>
+            <button id="btnClearCircles" class="btn">🧹 Klick-Kreise entfernen</button>
+          </div>
+          <div class="row" style="margin-top:6px">
             <button id="btnRevealArea" class="btn good">🎯 Bereich aufdecken</button>
             <button id="btnRevealAuto" class="btn good">🎯 Auflösen (Auto-Weiter)</button>
             <button id="btnShowFull" class="btn warn">🖼️ Bild komplett zeigen</button>
@@ -125,7 +156,19 @@
     const COLORS = ["#4da3ff","#ff4d6d","#22c55e","#eab308"]; // bis zu 4 Teams
     let playlist = [];
     let roundIdx = 0;
-    let adminOverlay = { clicks:{} };
+
+    // ADMIN Overlay-Daten
+    const adminOverlay = {
+      clicks: {},              // (legacy) Spieler-Previews, falls genutzt
+      teamCircles: {},         // NEU: ein Kreis pro Team
+      revealTeamCircles: false // NEU: sichtbar/nicht
+    };
+
+    // Team-Status (Badges)
+    const teamStatus = {
+      hasCircle: {}, // teamId -> bool (irgendwo gesetzt)
+      locked: {}     // teamId -> bool (eingeloggt)
+    };
 
     const imgEl = document.getElementById('img');
     const targetEl = document.getElementById('target');
@@ -137,18 +180,19 @@
     const teamsEl = document.getElementById('teams');
     const lobbyEl = document.getElementById('lobby');
 
-    // WICHTIG: target = "raw" (so wie an Server gesendet): entweder Pixel oder {normalized:true}
-    let target = {x:0,y:0};     // raw (Pixel oder normalisiert – je nachdem)
+    // target = RAW (so wie an Server): Pixel oder {normalized:true}
+    let target = {x:0,y:0};
     let radius = parseInt(radiusInput.value,10);
 
+    // Utilities
     function boardRect(){
       const r = boardEl.getBoundingClientRect();
       return {left:r.left + window.scrollX, top:r.top + window.scrollY, width:r.width, height:r.height};
     }
     function px(v){ return v+'px'; }
     function placeMarkerAt(el, x, y, r){
-      el.style.left = px(x);
-      el.style.top = px(y);
+      el.style.left = px(x - r);
+      el.style.top = px(y - r);
       el.style.width = px(r*2);
       el.style.height = px(r*2);
       el.style.display = 'block';
@@ -166,21 +210,18 @@
       placeMarkerAt(targetEl, dx, dy, radius);
     }
 
-    imgEl.addEventListener('load', ()=>{ 
-      // Bei Bildwechsel ggf. normalisiertes target neu in Pixel umrechnen
-      displayTargetMarker(target);
-    });
+    imgEl.addEventListener('load', ()=>{ displayTargetMarker(target); });
     radiusInput.addEventListener('input',()=>{
       radius = parseInt(radiusInput.value||'45',10);
       if(targetEl.style.display!=='none'){
+        const rect = targetEl.getBoundingClientRect();
+        // Nur Größe neu setzen; Position bleibt zentriert
         targetEl.style.width = px(radius*2);
         targetEl.style.height = px(radius*2);
       }
       drawOverlay();
     });
-    imageUrlInput.addEventListener('change', ()=>{ 
-      imgEl.src = imageUrlInput.value || '/images/sample.jpg'; 
-    });
+    imageUrlInput.addEventListener('change', ()=>{ imgEl.src = imageUrlInput.value || '/images/sample.jpg'; });
 
     // Admin setzt Ziel per Klick (immer als Pixel-Rohwert senden)
     boardEl.addEventListener('click', (e)=>{
@@ -191,31 +232,44 @@
       placeMarkerAt(targetEl, x, y, radius);
     });
 
-    // Admin controls (Rundensteuerung)
+    /* ========= Rundensteuerung ========= */
     document.getElementById('btnStart').onclick = ()=>{
       const payload = {
         imageUrl: imageUrlInput.value || '/images/sample.jpg',
         duration: Math.max(3, parseInt(countdownInput.value||'15',10)),
         radius: Math.max(5, Math.min(200, parseInt(radiusInput.value||'45',10))),
-        target, // kann Pixel ODER normalisiert sein
+        target, // Pixel ODER normalisiert
         question: (document.getElementById('question').value || '')
       };
       socket.emit('admin:startRound', payload);
     };
-    document.getElementById('btnRevealGuesses').onclick = ()=> socket.emit('admin:revealGuesses');
+
+    // NEU: Team-Kreise anzeigen/ausblenden/entfernen (Mapping zum neuen Server)
+    document.getElementById('btnRevealCircles').onclick = ()=> socket.emit('admin:revealTeamCircles');
+    document.getElementById('btnHideCircles').onclick   = ()=> socket.emit('admin:hideTeamCircles');
+    document.getElementById('btnClearCircles').onclick  = ()=> socket.emit('admin:clearTeamCircles');
+
+    // Reveal Zielbereich etc. (wie gehabt)
     document.getElementById('btnRevealArea').onclick = ()=> socket.emit('admin:revealArea', {autoNext:false});
     document.getElementById('btnRevealAuto').onclick = ()=> socket.emit('admin:revealArea', {autoNext:true, delayMs:3000});
-    document.getElementById('btnShowFull').onclick = ()=> socket.emit('admin:showFull');
+    document.getElementById('btnShowFull').onclick   = ()=> socket.emit('admin:showFull');
 
-    // Teams & Punkte
+    /* ========= Teams & Punkte ========= */
     function renderTeams(state){
       teamsEl.innerHTML = '';
       const t = state.teams || {};
       Object.values(t).forEach(team=>{
         const row = document.createElement('div');
         row.className='score-row';
+        const color = COLORS[team.colorIdx||0];
+        const hasC  = !!teamStatus.hasCircle[team.id];
+        const lock  = !!teamStatus.locked[team.id];
+
         row.innerHTML = `
-          <div class="name tag" style="border-color:${COLORS[team.colorIdx||0]}">🏷️ ${team.name}</div>
+          <div class="name tag" style="border-color:${color}">🏷️ ${team.name}
+            <span class="badge ${hasC?'ok':'muted'}">${hasC?'Kreis gesetzt':'kein Kreis'}</span>
+            <span class="badge ${lock?'ok':'muted'}">${lock?'eingeloggt':'offen'}</span>
+          </div>
           <div class="score tag">⭐ ${team.points||0}</div>
           <button class="btn good" data-id="${team.id}" data-a="plus1">+1</button>
           <button class="btn bad" data-id="${team.id}" data-a="minus1">-1</button>
@@ -227,9 +281,9 @@
       teamsEl.querySelectorAll('button').forEach(btn=>{
         const id = btn.getAttribute('data-id');
         const a = btn.getAttribute('data-a');
-        if(a==='plus1') btn.onclick = ()=> socket.emit('admin:adjustPoints', {teamId:id, delta: +1});
+        if(a==='plus1')  btn.onclick = ()=> socket.emit('admin:adjustPoints', {teamId:id, delta: +1});
         if(a==='minus1') btn.onclick = ()=> socket.emit('admin:adjustPoints', {teamId:id, delta: -1});
-        if(a==='apply') btn.onclick = ()=> {
+        if(a==='apply')  btn.onclick = ()=> {
           const inp = btn.parentElement.querySelector('.setInput');
           const val = parseInt(inp.value||'0',10);
           socket.emit('admin:adjustPoints', {teamId:id, delta: val});
@@ -238,8 +292,9 @@
       });
     }
 
-    // Lobby
-    function renderLobby(state){ window.__statePlayers = state.players || {};
+    /* ========= Lobby ========= */
+    function renderLobby(state){
+      window.__statePlayers = state.players || {};
       const players = Object.values(state.players||{});
       const byTeam = {};
       players.forEach(p=>{
@@ -254,7 +309,7 @@
       }).join(' ');
     }
 
-    // Overlay Größen-Anpassung
+    /* ========= Overlay ========= */
     const overlay = document.getElementById('overlay');
     function fitOverlay(){
       const r = boardEl.getBoundingClientRect();
@@ -264,44 +319,41 @@
     window.addEventListener('resize', ()=>{ fitOverlay(); drawOverlay(); });
     new ResizeObserver(()=>{ fitOverlay(); drawOverlay(); }).observe(boardEl);
 
-    // Overlay zeichnen (Kreise + Labels) – versteht normalisierte Klicks
+    // Zeichnet (optional) Legacy-Player-Clicks & NEU: Team-Kreise (bei Reveal)
     function drawOverlay(){
       const ctx = overlay.getContext('2d');
       ctx.clearRect(0,0,overlay.width,overlay.height);
+
       const teams = window.__stateTeams || {};
       const players = window.__statePlayers || {};
-      const teamIds = Object.keys(teams);
       ctx.font = '12px system-ui, Arial';
       ctx.textBaseline = 'top';
-      teamIds.forEach((tid, idx)=>{
-        const color = COLORS[idx % COLORS.length];
-        const teamClicks = adminOverlay.clicks[tid] || {};
-        Object.entries(teamClicks).forEach(([pid, click])=>{
+
+      // 1) (Legacy) einzelne Spieler-Clicks (falls du die noch nutzt)
+      Object.entries(adminOverlay.clicks).forEach(([tid, pClicks], idx)=>{
+        const color = COLORS[(teams[tid]?.colorIdx)||0] || COLORS[idx % COLORS.length];
+        Object.entries(pClicks).forEach(([pid, click])=>{
           let {x,y,normalized} = click || {};
-          // Falls normalisiert (oder <=1), in Pixel umrechnen
-          if (normalized || (x<=1 && y<=1)) {
-            x = x * overlay.width;
-            y = y * overlay.height;
-          }
+          if (normalized || (x<=1 && y<=1)) { x = x * overlay.width; y = y * overlay.height; }
           ctx.beginPath();
           ctx.strokeStyle = color;
-          ctx.lineWidth = 2;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4,3]);
           ctx.arc(x, y, radius, 0, Math.PI*2);
           ctx.stroke();
+          ctx.setLineDash([]);
           ctx.beginPath();
           ctx.arc(x,y,3,0,Math.PI*2);
           ctx.fillStyle = color;
           ctx.fill();
-          // Label mit Team + Spieler
-          const pname = (players[pid] && players[pid].name) ? players[pid].name : pid.slice(0,4);
-          const tname = (teams[tid] && teams[tid].name) ? teams[tid].name : tid;
+
+          const pname = (players[pid]?.name) || pid.slice(0,4);
+          const tname = (teams[tid]?.name) || tid;
           const label = `${tname} · ${pname}`;
-          const padding = 3;
-          const tw = ctx.measureText(label).width + padding*2;
-          const th = 16;
+          const padding = 3, th = 16, tw = ctx.measureText(label).width + padding*2;
           const lx = Math.min(Math.max(0, x + radius + 6), overlay.width - tw);
           const ly = Math.min(Math.max(0, y - th/2), overlay.height - th);
-          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillStyle = 'rgba(0,0,0,0.55)';
           ctx.fillRect(lx, ly, tw, th);
           ctx.strokeStyle = color;
           ctx.strokeRect(lx, ly, tw, th);
@@ -309,9 +361,40 @@
           ctx.fillText(label, lx + padding, ly + 2);
         });
       });
+
+      // 2) NEU: Team-Kreise (hell sichtbar NUR wenn reveal an)
+      if(adminOverlay.revealTeamCircles){
+        Object.entries(adminOverlay.teamCircles || {}).forEach(([tid, c])=>{
+          if(!c) return;
+          const color = COLORS[(teams[tid]?.colorIdx)||0] || '#4da3ff';
+          let x = c.x, y = c.y;
+          if (c.normalized || (x<=1 && y<=1)) { x = x * overlay.width; y = y * overlay.height; }
+          ctx.beginPath();
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = color;
+          ctx.arc(x, y, radius, 0, Math.PI*2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(x, y, 4, 0, Math.PI*2);
+          ctx.fillStyle = color;
+          ctx.fill();
+
+          const tname = (teams[tid]?.name) || tid;
+          const label = `Team-Kreis · ${tname}`;
+          const padding = 4, th = 18, tw = ctx.measureText(label).width + padding*2;
+          const lx = Math.min(Math.max(0, x + radius + 8), overlay.width - tw);
+          const ly = Math.min(Math.max(0, y - th/2), overlay.height - th);
+          ctx.fillStyle = 'rgba(0,0,0,0.65)';
+          ctx.fillRect(lx, ly, tw, th);
+          ctx.strokeStyle = color;
+          ctx.strokeRect(lx, ly, tw, th);
+          ctx.fillStyle = '#e5e7eb';
+          ctx.fillText(label, lx + padding, ly + 2);
+        });
+      }
     }
 
-    // Playlist
+    /* ========= Playlist ========= */
     const playlistJsonEl = document.getElementById('playlistJson');
     const questionInput = document.getElementById('question');
     const roundIndexEl = document.getElementById('roundIndex');
@@ -330,8 +413,8 @@
           questionInput.value = (playlist[0].question || '');
           imgEl.src = imageUrlInput.value;
           if(playlist[0].target){
-            target = playlist[0].target;             // RAW (evtl. normalized)
-            displayTargetMarker(target);              // Marker in Pixel anzeigen
+            target = playlist[0].target;     // RAW (evtl. normalized)
+            displayTargetMarker(target);      // Anzeige in Pixel
           }else{
             target = {x:0,y:0};
             targetEl.style.display='none';
@@ -377,17 +460,13 @@
       updateRoundProgress();
     };
 
-    // Admin State-Spiegel für Overlay
-    window.__stateTeams = {};
-    window.__statePlayers = {};
-
-    // Turn-Rendering (Admin)
+    /* ========= Turn-Control ========= */
     function renderTurn(state){
       const sel = document.getElementById('turnSelect');
       const now = document.getElementById('turnNow');
       const teams = state.teams || {};
-      const ids = Object.values(teams).sort((a,b)=> a.name.localeCompare(b.name));
-      sel.innerHTML = ids.map(t=> `<option value="${t.id}">${t.name}</option>`).join('');
+      const sorted = Object.values(teams).sort((a,b)=> a.name.localeCompare(b.name));
+      sel.innerHTML = sorted.map(t=> `<option value="${t.id}">${t.name}</option>`).join('');
       if(state.turnTeamId && teams[state.turnTeamId]){
         sel.value = state.turnTeamId;
         now.textContent = teams[state.turnTeamId].name;
@@ -411,7 +490,8 @@
       }
     });
 
-    // Global State-Updates
+    /* ========= State/Events vom Server ========= */
+    // Global State
     socket.on('state', s=>{
       window.__stateTeams = s.teams || {};
       renderTeams(s);
@@ -419,28 +499,67 @@
       renderTurn(s);
       fitOverlay();
       drawOverlay();
-      // Falls ein normalisiertes target gesetzt ist, nach Resize neu zeichnen
       displayTargetMarker(target);
     });
 
-    // Live-Clicks fürs Admin-Overlay (mit normalized-Flag)
+    // (Legacy) Live-Player-Clicks
     socket.on('admin:liveClick', ({teamId, playerId, x, y, normalized})=>{
       adminOverlay.clicks[teamId] = adminOverlay.clicks[teamId] || {};
       adminOverlay.clicks[teamId][playerId] = {x,y,normalized: !!normalized};
       drawOverlay();
     });
 
-    // Runden-Reset fürs Overlay
+    // Team-Kreis wurde gesetzt (nur Status fürs Admin-UI)
+    socket.on('admin:teamCircleSet', ({teamId})=>{
+      teamStatus.hasCircle[teamId] = true;
+      renderTeams({teams: window.__stateTeams});
+    });
+
+    // Team hat bestätigt (eingeloggt)
+    socket.on('admin:teamLocked', ({teamId})=>{
+      teamStatus.locked[teamId] = true;
+      renderTeams({teams: window.__stateTeams});
+    });
+
+    // Team wieder entsperrt
+    socket.on('admin:teamUnlocked', ({teamId})=>{
+      teamStatus.locked[teamId] = false;
+      renderTeams({teams: window.__stateTeams});
+    });
+
+    // Server: neue Round-Config (Reset Overlay/Status)
     socket.on('round:config', ()=>{
       adminOverlay.clicks = {};
+      adminOverlay.teamCircles = {};
+      adminOverlay.revealTeamCircles = false;
+      Object.keys(teamStatus.hasCircle).forEach(k=> delete teamStatus.hasCircle[k]);
+      Object.keys(teamStatus.locked).forEach(k=> delete teamStatus.locked[k]);
+      drawOverlay();
+      renderTeams({teams: window.__stateTeams});
+    });
+
+    // NEU: Reveal/Hide Team-Kreise inkl. Daten
+    socket.on('round:revealTeamCircles', ({reveal, teamCircles})=>{
+      adminOverlay.revealTeamCircles = !!reveal;
+      if(teamCircles) adminOverlay.teamCircles = teamCircles;
       drawOverlay();
     });
 
-    // History empfangen
+    // NEU: Clear Team-Kreise
+    socket.on('round:clearTeamCircles', ()=>{
+      adminOverlay.teamCircles = {};
+      adminOverlay.revealTeamCircles = false;
+      Object.keys(teamStatus.hasCircle).forEach(k=> delete teamStatus.hasCircle[k]);
+      Object.keys(teamStatus.locked).forEach(k=> delete teamStatus.locked[k]);
+      drawOverlay();
+      renderTeams({teams: window.__stateTeams});
+    });
+
+    // History rendern
     function renderHistory(list){
       const el = document.getElementById('historyList');
       if(!Array.isArray(list) || !list.length){ el.innerHTML = '<div class="small">Noch keine Runden.</div>'; return; }
-      el.innerHTML = list.slice().reverse().map((h,idx)=>{
+      el.innerHTML = list.slice().reverse().map((h)=>{
         const date = new Date(h.ts).toLocaleTimeString();
         const winners = (h.winners||[]).map(tid=> (window.__stateTeams[tid]?.name||tid)).join(', ') || '—';
         return `<div class="tag" style="display:block;margin:4px 0">
@@ -459,7 +578,7 @@
       document.getElementById('roundIndex').textContent = (playlist.length ? roundIdx : 0);
     }
 
-    // Auto-Weiter-Request vom Server
+    // Auto-Weiter-Request vom Server → nächste Playlist-Runde laden und starten
     socket.on('admin:requestNext', ()=>{
       if(playlist.length){
         document.getElementById('btnNextRound').click();
@@ -501,6 +620,11 @@
 
     // Admin-Handshake
     socket.emit('admin:hello');
+
+    // Overlay erstmal passend setzen
+    const overlay = document.getElementById('overlay');
+    fitOverlay();
+    drawOverlay();
   </script>
 </body>
 </html>
