@@ -3,6 +3,6 @@
     "imageUrl": "https://i.imgur.com/9pmqlc6.jpeg",
     "question": "Klicke auf den mittleren Stern!",
     "radius": 50,
-    "target": { "x": 0.5079, "y": 0.2057, "normalized": true }
+    "target": { "x": 0.5100, "y": 0.2032, "normalized": true }
   }
 ]
