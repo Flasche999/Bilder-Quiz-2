@@ -73,6 +73,11 @@
     window.__stateTeams = {}; 
     window.__statePlayers = {};
 
+    // >>> NEU: Beim (Re-)Connect sofort aktuellen Zustand vom Server anfordern
+    socket.on('connect', ()=>{
+      socket.emit('player:hello');
+    });
+
     // Turn-Mirror (welches Team ist dran)
     let __turnTeamId = null;
 
