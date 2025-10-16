@@ -101,6 +101,9 @@
     let radius = 45;
     let locked = false;
 
+    // Runde-Infos (für normalized Reveal etc.)
+    let roundIsNormalized = false;
+
     function showToast(msg){
       toast.textContent = msg;
       toast.style.display = 'block';
@@ -250,6 +253,7 @@
       radius = cfg.radius;
       countdownEl.textContent = cfg.duration;
       questionEl.textContent = cfg.question || '–';
+      roundIsNormalized = !!cfg.isNormalized; // merken, falls Reveal kommt
       updateBoardInteractivity();
     });
 
@@ -265,21 +269,23 @@
       updateBoardInteractivity();
     });
 
-    // Klick aufs Board
+    // Klick aufs Board – SENDEN ALS NORMALIZED (0..1)
     boardEl.addEventListener('click', (e)=>{
-      if(!canClick || locked){
-        return;
-      }
+      if(!canClick || locked) return;
       if(!isMyTurn()){
         showToast('Dein Team ist nicht dran.');
         updateBoardInteractivity();
         return;
       }
-      const r = boardRect();
-      const x = e.pageX - r.left;
-      const y = e.pageY - r.top;
-      placeMarkerAt(myMarker, x, y, radius);
-      socket.emit('player:clickUpdate', {x, y});
+      const rect = imgEl.getBoundingClientRect();
+      const relX = (e.clientX - rect.left) / rect.width;
+      const relY = (e.clientY - rect.top) / rect.height;
+
+      // Vorschau lokal in Pixel
+      placeMarkerAt(myMarker, relX * rect.width, relY * rect.height, radius);
+
+      // An Server senden – normalisiert
+      socket.emit('player:clickUpdate', { x: relX, y: relY, normalized: true });
     });
 
     // Lock / Unlock (nur wenn dran)
@@ -318,10 +324,13 @@
       updateBoardInteractivity();
     };
 
-    // Teammate live marker (hidden from other teams)
-    socket.on('team:mateClick', ({x,y})=>{
+    // Teammate live marker (hidden from other teams) – unterstützt normalized
+    socket.on('team:mateClick', ({x,y,normalized})=>{
       if(!canClick) return;
-      placeMarkerAt(mateMarker, x, y, radius);
+      const rect = imgEl.getBoundingClientRect();
+      const px = (normalized || (x<=1 && y<=1)) ? x * rect.width : x;
+      const py = (normalized || (x<=1 && y<=1)) ? y * rect.height : y;
+      placeMarkerAt(mateMarker, px, py, radius);
     });
 
     // Nach Auflösung
@@ -329,8 +338,13 @@
       statusEl.textContent = 'Klicks sichtbar (Team-weise)';
     });
 
-    socket.on('round:revealArea', ({target, radius})=>{
-      maskEl.style.background = `radial-gradient(circle ${radius}px at ${target.x}px ${target.y}px, rgba(0,0,0,0) 0%, rgba(0,0,0,0) ${radius-1}px, rgba(0,0,0,.88) ${radius}px)`;
+    // Reveal – unterstützt normalized Target
+    socket.on('round:revealArea', ({target, radius, isNormalized})=>{
+      const rect = imgEl.getBoundingClientRect();
+      const tx = (isNormalized || roundIsNormalized) ? target.x * rect.width  : target.x;
+      const ty = (isNormalized || roundIsNormalized) ? target.y * rect.height : target.y;
+      maskEl.style.background = `radial-gradient(circle ${radius}px at ${tx}px ${ty}px,
+        rgba(0,0,0,0) 0%, rgba(0,0,0,0) ${radius-1}px, rgba(0,0,0,.88) ${radius}px)`;
     });
 
     socket.on('round:showFull', ()=>{
