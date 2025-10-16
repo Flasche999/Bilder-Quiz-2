@@ -132,6 +132,16 @@ function computeWinners(){
 // ---- Sockets ----
 io.on('connection', (socket)=>{
 
+  // >>> NEU: Sofort den aktuellen Zustand an den frisch verbundenen Socket schicken
+  socket.emit('state', { teams: state.teams, players: state.players, turnTeamId: state.turnTeamId });
+  socket.emit('turn:update', { teamId: state.turnTeamId });
+
+  // >>> NEU: Spieler können aktiv den Zustand anfragen (z.B. nach Reconnect)
+  socket.on('player:hello', ()=>{
+    socket.emit('state', { teams: state.teams, players: state.players, turnTeamId: state.turnTeamId });
+    socket.emit('turn:update', { teamId: state.turnTeamId });
+  });
+
   // Admin hello
   socket.on('admin:hello', ()=>{
     socket.emit('state', { teams: state.teams, players: state.players, turnTeamId: state.turnTeamId });
@@ -254,7 +264,7 @@ io.on('connection', (socket)=>{
   socket.on('admin:revealGuesses', ()=>{
     if(!state.round) return;
     state.round.phase='reveal';
-    // On player views we keep teammates view the same; admin sees all team clicks
+    // Auf Spieler-Views: jetzt alle Team-Klicks sichtbar
     io.emit('round:revealGuesses', state.round.clicks);
   });
 
