@@ -6,6 +6,16 @@
   <title>Spieler · Bilder-Rätsel Quiz</title>
   <link rel="stylesheet" href="/style.css"/>
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    .hidden{display:none}
+    .marker{position:absolute;border:2px dashed #7aa2ff;border-radius:999px;pointer-events:none;mix-blend-mode:screen}
+    .marker.team{border-color:#22c55e}
+    .marker.locked{border-style:solid;border-color:#eab308}
+    .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.15);padding:8px 12px;border-radius:10px;z-index:9999}
+    .board{position:relative;display:inline-block}
+    .board img{max-width:100%;display:block;border-radius:12px}
+    .mask{position:absolute;inset:0;background:#000;opacity:1;border-radius:12px;pointer-events:none}
+  </style>
 </head>
 <body>
   <div class="container">
@@ -30,10 +40,10 @@
           <button id="btnJoin" class="btn acc">Beitreten</button>
         </div>
       </div>
-      <div class="small">Hinweis: Dein Team-Partner sieht live deinen Klick-Marker – andere Teams nicht.</div>
+      <div class="small">Hinweis: Dein Team-Partner kann den gemeinsamen Kreis ebenfalls setzen/verschieben. Erst nach „✅ Fertig“ ist euer Kreis fix.</div>
     </div>
 
-    <div id="gameCard" class="card" style="display:none">
+    <div id="gameCard" class="card hidden">
       <div class="row" style="align-items:center;justify-content:space-between">
         <div class="tag">Frage: <span id="question">–</span></div>
         <div class="tag">Team: <span id="myTeamName"></span></div>
@@ -43,12 +53,19 @@
       </div>
       <div class="hr"></div>
       <div class="center">
-        <div id="board" class="board">
+        <div id="board" class="board" style="pointer-events:none;opacity:.65">
           <img id="img" src="" alt=""/>
-          <div id="mask" class="mask" style="display:none"></div>
-          <div id="myMarker" class="marker" style="display:none"></div>
+          <div id="mask" class="mask hidden"></div>
+
+          <!-- Eigener Team-Kreis (lokale Vorschau) -->
+          <div id="teamCircle" class="marker" style="display:none"></div>
+          <!-- Vorschau vom Teammate -->
           <div id="mateMarker" class="marker team" style="display:none"></div>
+          <!-- Fixierter Kreis nach Bestätigen -->
           <div id="lockedMarker" class="marker locked" style="display:none"></div>
+
+          <!-- (optional) Fremd-Kreise bei Reveal -->
+          <div id="othersLayer" style="position:absolute;inset:0;pointer-events:none"></div>
         </div>
       </div>
       
@@ -60,12 +77,12 @@
 
       <div class="row" style="margin-top:10px">
         <button id="btnLock" class="btn good">✅ Fertig (einloggen)</button>
-        <button id="btnUnlock" class="btn warn" style="display:none">🔓 Änderung</button>
+        <button id="btnUnlock" class="btn warn hidden">🔓 Änderung</button>
       </div>
     </div>
   </div>
 
-  <div id="toast" class="toast" style="display:none"></div>
+  <div id="toast" class="toast hidden"></div>
 
   <script>
     const socket = io();
@@ -73,12 +90,10 @@
     window.__stateTeams = {}; 
     window.__statePlayers = {};
 
-    // >>> NEU: Beim (Re-)Connect sofort aktuellen Zustand vom Server anfordern
-    socket.on('connect', ()=>{
-      socket.emit('player:hello');
-    });
+    // Beim (Re-)Connect aktuellen Zustand holen
+    socket.on('connect', ()=> socket.emit('player:hello'));
 
-    // Turn-Mirror (welches Team ist dran)
+    // Turn-Mirror
     let __turnTeamId = null;
 
     const joinCard = document.getElementById('joinCard');
@@ -92,9 +107,10 @@
     const imgEl = document.getElementById('img');
     const boardEl = document.getElementById('board');
     const maskEl = document.getElementById('mask');
-    const myMarker = document.getElementById('myMarker');
+    const teamCircle = document.getElementById('teamCircle');
     const mateMarker = document.getElementById('mateMarker');
     const lockedMarker = document.getElementById('lockedMarker');
+    const othersLayer = document.getElementById('othersLayer');
     const btnLock = document.getElementById('btnLock');
     const btnUnlock = document.getElementById('btnUnlock');
     const toast = document.getElementById('toast');
@@ -106,27 +122,37 @@
     let radius = 45;
     let locked = false;
 
-    // Runde-Infos (für normalized Reveal etc.)
+    // Runde-Infos
     let roundIsNormalized = false;
+    let storedQuestion = '–';      // Frage-Text wird erst in Dunkelphase gezeigt
 
+    /* ---------- Utils ---------- */
+    function show(el){ el.classList.remove('hidden'); }
+    function hide(el){ el.classList.add('hidden'); }
     function showToast(msg){
       toast.textContent = msg;
-      toast.style.display = 'block';
-      setTimeout(()=> toast.style.display='none', 2500);
+      show(toast);
+      setTimeout(()=> hide(toast), 2200);
     }
-
     function boardRect(){
-      const r = boardEl.getBoundingClientRect();
+      const r = imgEl.getBoundingClientRect();
       return {left:r.left + window.scrollX, top:r.top + window.scrollY, width:r.width, height:r.height};
     }
     function px(v){ return v+'px'; }
-    
     function teamColor(t){
       const idx = (t && typeof t.colorIdx==='number') ? t.colorIdx : 0;
       return COLORS[idx % COLORS.length];
     }
+    function placeMarkerAt(el, x, y, r){
+      el.style.left = px(x - r);
+      el.style.top  = px(y - r);
+      el.style.width  = px(r*2);
+      el.style.height = px(r*2);
+      el.style.display = 'block';
+    }
+    function clearLayer(el){ el.innerHTML=''; }
 
-    // ---- Lobby-Karten ----
+    /* ---------- Lobby-Karten ---------- */
     function renderLobbyTeams(){
       const grid = document.getElementById('teamGrid');
       const teams = window.__stateTeams || {};
@@ -161,7 +187,7 @@
       });
     }
 
-    // ---- Sidebar Teams & Punkte ----
+    /* ---------- Sidebar Teams & Punkte ---------- */
     function renderSidebar(){
       const el = document.getElementById('sidebarTeams');
       const teams = Object.values(window.__stateTeams||{});
@@ -180,21 +206,7 @@
       }).join('');
     }
 
-    // ---- Marker setzen ----
-    function placeMarkerAt(el, x, y, r){
-      el.style.left = px(x);
-      el.style.top = px(y);
-      el.style.width = px(r*2);
-      el.style.height = px(r*2);
-      el.style.display = 'block';
-    }
-
-    // Alle Fremdmarker (".marker.other") entfernen
-    function clearOtherMarkers(){
-      document.querySelectorAll('.marker.other').forEach(m=>m.remove());
-    }
-
-    // ---- Turn-Helpers (nur aktuelles Team darf klicken) ----
+    /* ---------- Turn ---------- */
     function isMyTurn(){
       return !!(my && my.teamId && __turnTeamId && my.teamId === __turnTeamId);
     }
@@ -212,25 +224,24 @@
     function updateBoardInteractivity(){
       const enable = isMyTurn() && canClick && !locked;
       boardEl.style.pointerEvents = enable ? 'auto' : 'none';
-      boardEl.style.opacity = enable ? '1' : '0.65';
+      boardEl.style.opacity = enable ? '1' : '.65';
     }
 
-    // ---- Join ----
+    /* ---------- Join ---------- */
     btnJoin.onclick = ()=>{
       const name = (playerNameInput.value||'').trim();
       const teamName = (teamNameInput.value||'').trim();
       if(!name || !teamName){ showToast('Bitte Name und Team ausfüllen.'); return; }
       socket.emit('player:join', {name, teamName});
     };
-
     socket.on('player:accepted', (p)=>{
       my = p;
       myTeamNameEl.textContent = p.teamName;
-      joinCard.style.display='none';
-      gameCard.style.display='block';
+      hide(joinCard);
+      show(gameCard);
     });
 
-    // ---- Globaler State ----
+    /* ---------- Globaler State ---------- */
     socket.on('state', s=>{
       window.__stateTeams = s.teams||{};
       window.__statePlayers = s.players||{};
@@ -241,47 +252,46 @@
       updateBoardInteractivity();
     });
 
-    // turn:update (schnelles Live-Update)
     socket.on('turn:update', ({teamId})=>{
       __turnTeamId = teamId || null;
       renderTurnPlayer({teams: window.__stateTeams, turnTeamId: __turnTeamId});
       updateBoardInteractivity();
     });
 
-    // ---- Rundenfluss ----
+    /* ---------- Rundenfluss ---------- */
     socket.on('round:config', (cfg)=>{
-      // Reset state
+      // Reset
       locked=false; 
       canClick=false;
-      myMarker.style.display='none';
-      mateMarker.style.display='none';
-      lockedMarker.style.display='none';
-      maskEl.style.display='none';
-      clearOtherMarkers();
+      [teamCircle, mateMarker, lockedMarker].forEach(el=> el.style.display='none');
+      hide(maskEl);
+      clearLayer(othersLayer);
       statusEl.textContent = 'Countdown läuft…';
 
       imgEl.src = cfg.imageUrl;
       radius = cfg.radius;
       countdownEl.textContent = cfg.duration;
-      questionEl.textContent = cfg.question || '–';
-      roundIsNormalized = !!cfg.isNormalized; // merken, falls Reveal kommt
+
+      // Frage erst in Dark zeigen
+      storedQuestion = cfg.question || '–';
+      questionEl.textContent = '–';
+
+      roundIsNormalized = !!cfg.isNormalized;
       updateBoardInteractivity();
     });
 
-    socket.on('round:tick', (t)=>{
-      countdownEl.textContent = t;
-    });
+    socket.on('round:tick', (t)=>{ countdownEl.textContent = t; });
 
     socket.on('round:dark', ()=>{
-      maskEl.style.display='block';
-      maskEl.style.background = '#000'; // 100% schwarz
-      // Nur klicken, wenn eigenes Team dran ist
-      canClick = isMyTurn();
+      // Frage erscheint jetzt erst
+      questionEl.textContent = storedQuestion;
+      show(maskEl);                 // 100% schwarz
+      canClick = isMyTurn();        // nur eigenes Team darf klicken
       statusEl.textContent = canClick ? 'Klicke auf die gesuchte Stelle…' : 'Warten – anderes Team ist dran…';
       updateBoardInteractivity();
     });
 
-    // Klick aufs Board – SENDEN ALS NORMALIZED (0..1)
+    /* ---------- Gemeinsamer Team-Kreis setzen (NORMALISIERT senden) ---------- */
     boardEl.addEventListener('click', (e)=>{
       if(!canClick || locked) return;
       if(!isMyTurn()){
@@ -289,109 +299,138 @@
         updateBoardInteractivity();
         return;
       }
-      const rect = imgEl.getBoundingClientRect();
-      const relX = (e.clientX - rect.left) / rect.width;
-      const relY = (e.clientY - rect.top) / rect.height;
+      const rect = boardRect();
+      const relX = (e.pageX - rect.left) / rect.width;
+      const relY = (e.pageY - rect.top)  / rect.height;
 
-      // Vorschau lokal in Pixel
-      placeMarkerAt(myMarker, relX * rect.width, relY * rect.height, radius);
+      // Lokale Vorschau (Pixel)
+      placeMarkerAt(teamCircle, relX * rect.width, relY * rect.height, radius);
 
-      // An Server senden – normalisiert
-      socket.emit('player:clickUpdate', { x: relX, y: relY, normalized: true });
+      // An Server – EIN Kreis pro Team (beide Spieler dürfen)
+      socket.emit('team:setCircle', { x: relX, y: relY, normalized: true });
     });
 
-    // Lock / Unlock (nur wenn dran)
+    // Teammate-Preview des Team-Kreises
+    socket.on('team:circlePreview', ({x,y,normalized})=>{
+      const rect = boardRect();
+      const px = (normalized || (x<=1 && y<=1)) ? x * rect.width : x;
+      const py = (normalized || (y<=1)) ? y * rect.height : y;
+      placeMarkerAt(mateMarker, px, py, radius);
+    });
+
+    /* ---------- Bestätigen / Entsperren ---------- */
     btnLock.onclick = ()=>{
-      if(!isMyTurn()){
-        showToast('Dein Team ist nicht dran.');
-        return;
-      }
-      if(myMarker.style.display==='none'){ showToast('Bitte zuerst klicken.'); return; }
+      if(!isMyTurn()){ showToast('Dein Team ist nicht dran.'); return; }
+      if(teamCircle.style.display==='none'){ showToast('Bitte zuerst klicken.'); return; }
       locked = true; 
       canClick=false;
-      btnLock.style.display='none';
-      btnUnlock.style.display='inline-block';
-      lockedMarker.style.left = myMarker.style.left;
-      lockedMarker.style.top = myMarker.style.top;
-      lockedMarker.style.width = myMarker.style.width;
-      lockedMarker.style.height = myMarker.style.height;
+      btnLock.classList.add('hidden');
+      btnUnlock.classList.remove('hidden');
+
+      // Fixierten Marker an gleiche Stelle legen
+      lockedMarker.style.left = teamCircle.style.left;
+      lockedMarker.style.top  = teamCircle.style.top;
+      lockedMarker.style.width  = teamCircle.style.width;
+      lockedMarker.style.height = teamCircle.style.height;
       lockedMarker.style.display = 'block';
-      socket.emit('player:lock');
+
+      socket.emit('team:confirm');
       statusEl.textContent = 'Eingeloggt – warte auf Auflösung…';
       updateBoardInteractivity();
     };
 
     btnUnlock.onclick = ()=>{
-      if(!isMyTurn()){
-        showToast('Dein Team ist nicht dran.');
-        return;
-      }
+      if(!isMyTurn()){ showToast('Dein Team ist nicht dran.'); return; }
       locked = false; 
       canClick=true;
-      btnLock.style.display='inline-block';
-      btnUnlock.style.display='none';
-      lockedMarker.style.display='none';
-      socket.emit('player:unlock');
+      btnLock.classList.remove('hidden');
+      btnUnlock.classList.add('hidden');
+      lockedMarker.style.display = 'none';
+      socket.emit('team:unconfirm');
       statusEl.textContent = 'Änderung möglich – erneut klicken und einloggen.';
       updateBoardInteractivity();
     };
 
-    // Teammate live marker (hidden from other teams) – unterstützt normalized
-    socket.on('team:mateClick', ({x,y,normalized})=>{
-      if(!canClick) return;
-      const rect = imgEl.getBoundingClientRect();
-      const px = (normalized || (x<=1 && y<=1)) ? x * rect.width : x;
-      const py = (normalized || (x<=1 && y<=1)) ? y * rect.height : y;
-      placeMarkerAt(mateMarker, px, py, radius);
+    // Admin signalisiert Team-Lock (falls Partner gelockt hat)
+    socket.on('admin:teamLocked', ({teamId})=>{
+      if(my.teamId !== teamId) return;
+      locked = true; canClick=false;
+      btnLock.classList.add('hidden');
+      btnUnlock.classList.remove('hidden');
+      // Übernehme aktuelle Kreis-Position als locked
+      lockedMarker.style.left = teamCircle.style.left;
+      lockedMarker.style.top  = teamCircle.style.top;
+      lockedMarker.style.width  = teamCircle.style.width;
+      lockedMarker.style.height = teamCircle.style.height;
+      lockedMarker.style.display = 'block';
+      statusEl.textContent = 'Eingeloggt – warte auf Auflösung…';
+      updateBoardInteractivity();
+    });
+    socket.on('admin:teamUnlocked', ({teamId})=>{
+      if(my.teamId !== teamId) return;
+      locked = false; canClick = isMyTurn();
+      btnLock.classList.remove('hidden');
+      btnUnlock.classList.add('hidden');
+      lockedMarker.style.display = 'none';
+      statusEl.textContent = canClick ? 'Klicke auf die gesuchte Stelle…' : 'Warten – anderes Team ist dran…';
+      updateBoardInteractivity();
     });
 
-    // 👀 Admin drückt "Klicks zeigen": ALLE Teams/Live-Klicks anzeigen (über schwarzer Maske)
-    socket.on('round:revealGuesses', (teamMarkers)=>{
-      statusEl.textContent = 'Alle Klicks sichtbar';
-      clearOtherMarkers();
-
+    /* ---------- Admin: Klick-Kreise anzeigen/ausblenden/entfernen ---------- */
+    // Reveal Team-Kreise (alle Teams) – nur Kreise, keine Player-Bubbles
+    socket.on('round:revealTeamCircles', ({reveal, teamCircles})=>{
+      clearLayer(othersLayer);
+      if(!reveal){ return; }
+      const rect = boardRect();
       const teams = window.__stateTeams || {};
-      const rect = imgEl.getBoundingClientRect();
-
-      Object.entries(teamMarkers || {}).forEach(([teamId, playersObj])=>{
-        const color = (teams[teamId] ? COLORS[teams[teamId].colorIdx || 0] : '#ccc');
-        Object.entries(playersObj || {}).forEach(([pid, point])=>{
-          let {x,y,normalized} = point || {};
-          if (normalized || (x<=1 && y<=1)) { // normalisierte Koordinaten → in Pixel
-            x = x * rect.width;
-            y = y * rect.height;
-          }
-          const mark = document.createElement('div');
-          mark.className = 'marker other';
-          mark.style.borderColor = color;
-          mark.style.left = `${x}px`;
-          mark.style.top = `${y}px`;
-          mark.style.width = `${radius*2}px`;
-          mark.style.height = `${radius*2}px`;
-          boardEl.appendChild(mark);
-        });
+      Object.entries(teamCircles||{}).forEach(([tid, c])=>{
+        if(!c) return;
+        let x = c.x, y = c.y;
+        if (c.normalized || (x<=1 && y<=1)){ x *= rect.width; y *= rect.height; }
+        const el = document.createElement('div');
+        el.className = 'marker other';
+        el.style.position = 'absolute';
+        el.style.border = '2px solid ' + (teams[tid] ? COLORS[teams[tid].colorIdx||0] : '#7aa2ff');
+        el.style.borderRadius = '999px';
+        el.style.left = px(x - radius);
+        el.style.top  = px(y - radius);
+        el.style.width  = px(radius*2);
+        el.style.height = px(radius*2);
+        othersLayer.appendChild(el);
       });
     });
 
-    // Reveal – unterstützt normalized Target; Außenbereich bleibt 100% schwarz
-    socket.on('round:revealArea', ({target, radius, isNormalized})=>{
-      const rect = imgEl.getBoundingClientRect();
+    // Klick-Kreise komplett löschen (z. B. neue Runde oder Admin „🧹“)
+    socket.on('round:clearTeamCircles', ()=>{
+      [teamCircle, mateMarker, lockedMarker].forEach(el=> el.style.display='none');
+      clearLayer(othersLayer);
+      locked=false; 
+      canClick=isMyTurn();
+      btnLock.classList.remove('hidden');
+      btnUnlock.classList.add('hidden');
+      statusEl.textContent = canClick ? 'Klicke auf die gesuchte Stelle…' : 'Warten – anderes Team ist dran…';
+      updateBoardInteractivity();
+    });
+
+    /* ---------- Reveal Zielbereich / Show Full ---------- */
+    socket.on('round:revealArea', ({target, radius:rad, isNormalized})=>{
+      const rect = boardRect();
       const tx = (isNormalized || roundIsNormalized) ? target.x * rect.width  : target.x;
       const ty = (isNormalized || roundIsNormalized) ? target.y * rect.height : target.y;
-      maskEl.style.background = `radial-gradient(circle ${radius}px at ${tx}px ${ty}px,
-        rgba(0,0,0,0) 0%, rgba(0,0,0,0) ${radius-1}px, rgba(0,0,0,1) ${radius}px)`;
+      maskEl.style.background = `radial-gradient(circle ${rad}px at ${tx}px ${ty}px,
+        rgba(0,0,0,0) 0%, rgba(0,0,0,0) ${rad-1}px, rgba(0,0,0,1) ${rad}px)`;
+      show(maskEl); // Außen bleibt schwarz, nur Ziel wird hell
     });
 
     socket.on('round:showFull', ()=>{
-      maskEl.style.display='none';
+      hide(maskEl);
       statusEl.textContent = 'Gesamtes Bild sichtbar';
       canClick = false;
       updateBoardInteractivity();
-      // Marker anderer Teams können bleiben – optional:
-      // clearOtherMarkers();
+      // othersLayer kann bleiben – ist oft nützlich zum Nachsehen
     });
 
-    // Utility updates
+    /* ---------- Upload kleiner Helfer ---------- */
     socket.on('toast', showToast);
   </script>
 </body>
